@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt, QPoint, QSize, QTimer
+from PyQt6.QtCore import Qt, QPoint, QSize, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QPainter
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QDialog, QDialogButtonBox,
-    QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QFileDialog, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QTextEdit,
-    QScrollArea, QTabWidget, QVBoxLayout, QWidget,
+    QScrollArea, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from config import Config, OverlayConfig
 from context_manager import DialogueLine
-from hooker import HookerService, StreamState, list_processes
+from hooker import HookerService, StreamState
 from screenshot_service import ScreenshotService
+from ruby_label import RubyLabel
+from process_catalog import ProcessEntry, list_process_entries
 
 
 class _ResizeGrip(QWidget):
@@ -118,10 +120,10 @@ class BacklogWindow(QWidget):
 
     def __init__(self, ov_cfg: OverlayConfig, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
-        self.setWindowTitle("Backlog")
+        self.setWindowTitle("翻译历史")
         self.resize(420, 540)
         self._ov_cfg = ov_cfg
-        self._entries: list[tuple[QLabel, QLabel]] = []
+        self._entries: list[tuple[RubyLabel, QLabel]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -163,7 +165,7 @@ class BacklogWindow(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
-        jp_lbl = QLabel(jp, self._container)
+        jp_lbl = RubyLabel(jp, self._container, furigana_enabled=ov.jp_furigana_enabled)
         r, g, b, a = ov.jp_color
         jp_lbl.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -194,6 +196,7 @@ class BacklogWindow(QWidget):
         self._ov_cfg = ov_cfg
         self._apply_bg()
         for jp_lbl, en_lbl in self._entries:
+            jp_lbl.setFuriganaEnabled(ov_cfg.jp_furigana_enabled)
             r, g, b, a = ov_cfg.jp_color
             jp_lbl.setStyleSheet(
                 f"color: rgba({r},{g},{b},{a}); "
@@ -215,10 +218,10 @@ class ContextViewerWindow(QWidget):
 
     def __init__(self, ov_cfg: OverlayConfig, parent=None) -> None:
         super().__init__(parent, Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
-        self.setWindowTitle("Context Viewer")
+        self.setWindowTitle("剧情记忆")
         self.resize(520, 620)
         self._ov_cfg = ov_cfg
-        self._history_entries: list[tuple[QLabel | None, QLabel, QLabel]] = []
+        self._history_entries: list[tuple[QLabel | None, RubyLabel, QLabel]] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -236,7 +239,7 @@ class ContextViewerWindow(QWidget):
             "Context will be summarized automatically when it grows large enough, "
             "or you can trigger it manually via right-click → Compact context."
         )
-        self._tabs.addTab(self._summary_edit, "Summary")
+        self._tabs.addTab(self._summary_edit, "剧情摘要")
 
         # --- History tab ---
         history_widget = QWidget()
@@ -252,7 +255,7 @@ class ContextViewerWindow(QWidget):
         self._history_inner.addStretch()
         self._history_scroll.setWidget(self._history_container)
         history_layout.addWidget(self._history_scroll)
-        self._tabs.addTab(history_widget, "History")
+        self._tabs.addTab(history_widget, "近期对话")
 
         self._apply_style()
 
@@ -281,10 +284,11 @@ class ContextViewerWindow(QWidget):
     def _style_entry(
         self,
         scene_lbl: QLabel | None,
-        jp_lbl: QLabel,
+        jp_lbl: RubyLabel,
         en_lbl: QLabel,
     ) -> None:
         ov = self._ov_cfg
+        jp_lbl.setFuriganaEnabled(ov.jp_furigana_enabled)
         if scene_lbl is not None:
             jr, jg, jb, ja = ov.jp_color
             er, eg, eb, ea = ov.en_color
@@ -344,7 +348,8 @@ class ContextViewerWindow(QWidget):
                 scene_lbl.setTextInteractionFlags(_selectable)
                 self._history_inner.insertWidget(self._history_inner.count() - 1, scene_lbl)
 
-            jp_lbl = QLabel(line.jp, self._history_container)
+            jp_lbl = RubyLabel(line.jp, self._history_container,
+                               furigana_enabled=self._ov_cfg.jp_furigana_enabled)
             jp_lbl.setWordWrap(True)
             jp_lbl.setTextInteractionFlags(_selectable)
             en_lbl = QLabel(line.en, self._history_container)
@@ -380,7 +385,7 @@ class OverlayWindow(QWidget):
                  clear_context_fn, compact_context_fn,
                  hooker: HookerService,
                  screenshot_service: ScreenshotService,
-                 get_context_fn=None) -> None:
+                 get_context_fn=None, request_screen_fn=None) -> None:
         super().__init__()
         self._cfg = cfg
         self._save_fn = save_fn
@@ -391,11 +396,14 @@ class OverlayWindow(QWidget):
         self._hooker = hooker
         self._screenshot_service = screenshot_service
         self._get_context_fn = get_context_fn or (lambda: (None, []))
+        self._request_screen_fn = request_screen_fn or (lambda: None)
         self._drag_pos: QPoint | None = None
         self._backlog: list[tuple[str, str]] = []
         self._backlog_win: BacklogWindow | None = None
         self._context_viewer: ContextViewerWindow | None = None
         self._retry_fn = None
+        self.is_busy = False
+        self.controller_status_fn = lambda: "手柄监听尚未启动"
 
         self._setup_window()
         self._setup_ui()
@@ -409,21 +417,42 @@ class OverlayWindow(QWidget):
     # ------------------------------------------------------------------
 
     def _setup_window(self) -> None:
+        self.update_game_title()
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.Tool
+            | Qt.WindowType.Window
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setMinimumSize(200, 60)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setMinimumSize(480, 150)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setContentsMargins(12, 36, 12, 10)
         layout.setSpacing(4)
 
+        # Ruby needs extra vertical space. A scrollable text area keeps every
+        # line reachable even in a short floating window or with large fonts.
+        self._subtitle_scroll = QScrollArea(self)
+        self._subtitle_scroll.setWidgetResizable(True)
+        self._subtitle_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._subtitle_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._subtitle_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        self._subtitle_scroll.viewport().setAutoFillBackground(False)
+        self._subtitle_container = QWidget()
+        self._subtitle_container.setAutoFillBackground(False)
+        self._subtitle_layout = QVBoxLayout(self._subtitle_container)
+        self._subtitle_layout.setContentsMargins(0, 0, 0, 0)
+        self._subtitle_layout.setSpacing(4)
+        self._subtitle_scroll.setWidget(self._subtitle_container)
+        # setWidget enables autofill, so turn it off after assigning the child.
+        self._subtitle_container.setAutoFillBackground(False)
+        self._subtitle_container.setStyleSheet("background: transparent;")
+        layout.addWidget(self._subtitle_scroll, 1)
+
         # Japanese text — small, dimmed
-        self._jp_label = QLabel("")
+        self._jp_label = RubyLabel("", furigana_enabled=self._cfg.overlay.jp_furigana_enabled)
         r, g, b, a = self._cfg.overlay.jp_color
         self._jp_label.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -433,10 +462,10 @@ class OverlayWindow(QWidget):
         self._jp_label.setWordWrap(True)
         self._jp_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._jp_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self._jp_label)
+        self._subtitle_layout.addWidget(self._jp_label)
 
         # English translation — larger, bright
-        self._en_label = QLabel("Waiting for text...")
+        self._en_label = QLabel("先选择游戏或模拟器窗口，再按 Ctrl+Alt+T 识屏翻译。\n首次使用请在设置中填写模型 API Key。")
         r, g, b, a = self._cfg.overlay.en_color
         self._en_label.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -446,9 +475,14 @@ class OverlayWindow(QWidget):
         self._en_label.setWordWrap(True)
         self._en_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self._en_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(self._en_label)
-
-        layout.addStretch()
+        self._subtitle_layout.addWidget(self._en_label)
+        self._subtitle_layout.addStretch()
+        self._subtitle_layout_timer = QTimer(self)
+        self._subtitle_layout_timer.setSingleShot(True)
+        self._subtitle_layout_timer.timeout.connect(self._sync_subtitle_heights)
+        self._subtitle_container.installEventFilter(self)
+        self._subtitle_scroll.viewport().installEventFilter(self)
+        self._subtitle_layout_timer.start(0)
 
         # Resize grip (bottom-right corner, inside layout)
         grip = _ResizeGrip(self)
@@ -510,6 +544,16 @@ class OverlayWindow(QWidget):
         self._retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._retry_btn.clicked.connect(self._on_retry_clicked)
         self._retry_btn.hide()
+        self._capture_btn = QPushButton("识屏翻译", self)
+        self._capture_btn.setGeometry(10, 4, 86, 24)
+        self._capture_btn.setToolTip("翻译当前游戏画面（Ctrl+Alt+T）")
+        self._capture_btn.setStyleSheet("QPushButton {color: white; background: #424271; border: 0; border-radius: 4px;} QPushButton:hover {background: #5a5a92;}")
+        self._capture_btn.clicked.connect(self._request_screen_fn)
+        self._window_btn = QPushButton("选择游戏窗口", self)
+        self._window_btn.setGeometry(104, 4, 100, 24)
+        self._window_btn.setToolTip("选择 DuckStation、ePSXe 等游戏窗口；仅截图，不注入模拟器")
+        self._window_btn.setStyleSheet(self._capture_btn.styleSheet())
+        self._window_btn.clicked.connect(self._attach_screenshot)
         self._position_top_buttons()
 
         # Scene diff label — bottom-left, absolutely positioned, hidden until first capture
@@ -533,15 +577,17 @@ class OverlayWindow(QWidget):
 
         # Inline context popup (right-click menu, Wayland-compatible)
         self._ctx_popup = _ContextPopup(self)
-        self._ctx_popup.add_action("Save context\u2026",    self._save_context)
-        self._ctx_popup.add_action("Load context\u2026",    self._load_context)
-        self._ctx_popup.add_action("Clear context",         self._on_clear_context)
-        self._ctx_popup.add_action("Compact context",       self._compact_context_fn)
-        self._ctx_popup.add_action("Attach to process\u2026", self._attach_process)
+        self._ctx_popup.add_action("识屏翻译当前画面", self._request_screen_fn)
+        self._ctx_popup.add_action("选择游戏窗口", self._attach_screenshot)
+        self._ctx_popup.add_action("保存剧情记忆…",    self._save_context)
+        self._ctx_popup.add_action("载入剧情记忆…",    self._load_context)
+        self._ctx_popup.add_action("清空剧情记忆（切换存档／路线）", self._on_clear_context)
+        self._ctx_popup.add_action("整理剧情摘要", self._compact_context_fn)
+        self._ctx_popup.add_action("连接文字钩子（PC 视觉小说）…", self._attach_process)
         self._streams_btn = self._ctx_popup.add_action(
-            "Select text streams\u2026", self._pick_streams
+            "选择文字流…", self._pick_streams
         )
-        self._ctx_popup.add_action("Attach screenshot window\u2026", self._attach_screenshot)
+        self._ctx_popup.add_action("显示／隐藏浮窗（Ctrl+Alt+H）", self.toggle_visible)
 
     def _position_top_buttons(self) -> None:
         exit_x = self.width() - self._exit_btn.width() - 4
@@ -570,10 +616,21 @@ class OverlayWindow(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    def update_game_title(self) -> None:
+        title = self._cfg.game_title.strip()
+        self.setWindowTitle("VNTL 日译中" + (f" · {title}" if title else ""))
+
+    def set_busy(self, busy: bool) -> None:
+        self.is_busy = busy
+        for widget in (self._capture_btn, self._window_btn, self._gear_btn,
+                       self._ctx_popup, self._retry_btn):
+            widget.setEnabled(not busy)
+
     def update_text(self, jp: str, en: str, replace_last: bool = False) -> None:
         """Display a new translated line."""
         self._jp_label.setText(jp)
         self._en_label.setText(en)
+        self._subtitle_scroll.verticalScrollBar().setValue(0)
         r, g, b, a = self._cfg.overlay.en_color
         self._en_label.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -589,7 +646,7 @@ class OverlayWindow(QWidget):
             if self._backlog_win is not None:
                 self._backlog_win.append_entry(jp, en)
 
-    def show_loading(self, message: str = "Translating...") -> None:
+    def show_loading(self, message: str = "正在翻译…") -> None:
         """Show a status indicator while an async LLM call is in flight."""
         self._retry_btn.setEnabled(False)
         self._en_label.setText(message)
@@ -720,6 +777,7 @@ class OverlayWindow(QWidget):
         self._cfg.overlay.en_color     = list(ov.en_color)
         self._cfg.overlay.jp_font_family = ov.jp_font_family
         self._cfg.overlay.jp_font_size   = ov.jp_font_size
+        self._cfg.overlay.jp_furigana_enabled = ov.jp_furigana_enabled
         self._cfg.overlay.en_font_family = ov.en_font_family
         self._cfg.overlay.en_font_size   = ov.en_font_size
         r, g, b, a = ov.jp_color
@@ -728,6 +786,7 @@ class OverlayWindow(QWidget):
             f"font-family: '{ov.jp_font_family}'; "
             f"font-size: {ov.jp_font_size}pt;"
         )
+        self._jp_label.setFuriganaEnabled(ov.jp_furigana_enabled)
         r, g, b, a = ov.en_color
         self._en_label.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -739,6 +798,25 @@ class OverlayWindow(QWidget):
             self._backlog_win.refresh_appearance(ov)
         if self._context_viewer is not None:
             self._context_viewer.refresh_appearance(ov)
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() in (QEvent.Type.LayoutRequest, QEvent.Type.Resize):
+            if watched in (self._subtitle_container, self._subtitle_scroll.viewport()):
+                self._subtitle_layout_timer.start(0)
+        return super().eventFilter(watched, event)
+
+    def _sync_subtitle_heights(self) -> None:
+        width = max(1, self._subtitle_scroll.viewport().width())
+        heights = []
+        for label in (self._jp_label, self._en_label):
+            label.ensurePolished()
+            height = max(0, label.heightForWidth(width)) if label.text() else 0
+            heights.append(height)
+            if label.minimumHeight() != height or label.maximumHeight() != height:
+                label.setFixedHeight(height)
+        total = sum(heights) + self._subtitle_layout.spacing()
+        if self._subtitle_container.minimumHeight() != total:
+            self._subtitle_container.setMinimumHeight(total)
 
     # ------------------------------------------------------------------
     # Right-click context menu
@@ -761,11 +839,19 @@ class OverlayWindow(QWidget):
         )
         if path:
             self._load_context_fn(path)
+            self.hide_retry_button()
             summary, history = self._get_context_fn()
             self.update_context(summary, history)
 
     def _on_clear_context(self) -> None:
         self._clear_context_fn()
+        self.hide_retry_button()
+        self._backlog.clear()
+        if self._backlog_win is not None:
+            self._backlog_win.close()
+            self._backlog_win = None
+        self._jp_label.clear()
+        self._en_label.setText("剧情记忆已清空，请读取当前存档的画面。")
         self.update_context(None, [])
 
     def _attach_process(self) -> None:
@@ -783,8 +869,9 @@ class OverlayWindow(QWidget):
     def _attach_screenshot(self) -> None:
         def do_attach(pid: int) -> bool:
             self._screenshot_service.set_pid(pid)
+            self._en_label.setText("游戏窗口已选择。让游戏画面保持可见，按 Ctrl+Alt+T 翻译。")
             return True
-        dlg = ProcessPickerDialog(do_attach, self, title="Attach screenshot window")
+        dlg = ProcessPickerDialog(do_attach, self, title="选择游戏窗口")
         dlg.exec()
 
     def _pick_streams(self) -> None:
@@ -899,14 +986,17 @@ class ProcessPickerDialog(QDialog):
         self,
         attach_fn,
         parent: QWidget | None = None,
-        title: str = "Attach to process",
-        fail_msg: str = "Could not attach to PID {pid}.",
+        title: str = "选择进程",
+        fail_msg: str = "无法连接进程 {pid}，请刷新后重新选择。",
     ) -> None:
         super().__init__(parent)
         self._attach_fn = attach_fn
         self._fail_msg = fail_msg
+        self._group_expanded = {"apps": True, "background": False}
+        self._active_filter = ""
         self.setWindowTitle(title)
-        self.setMinimumSize(380, 420)
+        self.setMinimumSize(640, 420)
+        self.resize(780, 540)
         self._build_ui()
         self._populate()
 
@@ -920,53 +1010,119 @@ class ProcessPickerDialog(QDialog):
         layout.setContentsMargins(10, 10, 10, 10)
 
         self._filter = QLineEdit(self)
-        self._filter.setPlaceholderText("Filter by name…")
+        self._filter.setPlaceholderText("搜索窗口标题、进程名或 PID，例如 DuckStation")
+        self._filter.setClearButtonEnabled(True)
+        self._filter.setMinimumHeight(30)
         self._filter.textChanged.connect(self._apply_filter)
         layout.addWidget(self._filter)
 
-        self._list = QListWidget(self)
+        self._list = QTreeWidget(self)
+        self._list.setHeaderLabels(["应用 / 窗口标题", "进程名", "PID"])
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._list.setUniformRowHeights(True)
         self._list.setAlternatingRowColors(True)
-        self._list.itemDoubleClicked.connect(self._do_attach)
+        self._list.setIndentation(18)
+        self._list.header().setStretchLastSection(False)
+        self._list.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._list.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self._list.header().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self._list.setColumnWidth(1, 270)
+        self._list.itemActivated.connect(self._do_attach)
+        self._list.currentItemChanged.connect(self._update_selection)
         layout.addWidget(self._list)
 
+        self._empty_label = QLabel("没有匹配的进程。请修改搜索内容，或启动游戏后刷新。")
+        self._empty_label.setWordWrap(True)
+        self._empty_label.hide()
+        layout.addWidget(self._empty_label)
+
         btns = QDialogButtonBox(self)
-        self._attach_btn = btns.addButton("Attach", QDialogButtonBox.ButtonRole.AcceptRole)
-        refresh_btn      = btns.addButton("Refresh", QDialogButtonBox.ButtonRole.ResetRole)
+        self._attach_btn = btns.addButton("选择", QDialogButtonBox.ButtonRole.AcceptRole)
+        self._attach_btn.setEnabled(False)
+        self._attach_btn.setDefault(True)
+        refresh_btn      = btns.addButton("刷新", QDialogButtonBox.ButtonRole.ResetRole)
         cancel_btn       = btns.addButton(QDialogButtonBox.StandardButton.Cancel)
+        cancel_btn.setText("取消")
         self._attach_btn.clicked.connect(self._do_attach)
         refresh_btn.clicked.connect(self._populate)
         cancel_btn.clicked.connect(self.reject)
         layout.addWidget(btns)
 
     def _populate(self) -> None:
-        self._all_items: list[tuple[int, str]] = sorted(
-            list_processes(), key=lambda x: x[1].lower()
+        self._all_items: list[ProcessEntry] = sorted(
+            list_process_entries(), key=lambda entry: (entry.name.casefold(), entry.pid)
         )
         self._apply_filter(self._filter.text())
 
     def _apply_filter(self, text: str) -> None:
+        selected_pid = self._selected_pid()
+        if not self._active_filter:
+            for index in range(self._list.topLevelItemCount()):
+                group = self._list.topLevelItem(index)
+                key = group.data(0, Qt.ItemDataRole.UserRole + 1)
+                self._group_expanded[key] = group.isExpanded()
+        needle = text.strip().casefold()
+        self._active_filter = needle
         self._list.clear()
-        needle = text.strip().lower()
-        for pid, name in self._all_items:
-            if needle and needle not in name.lower():
+        entries = [entry for entry in self._all_items if not needle or any(
+            needle in value.casefold()
+            for value in (entry.name, str(entry.pid), *entry.window_titles)
+        )]
+        restored = None
+        for key, label, is_app in (("apps", "应用", True), ("background", "后台进程", False)):
+            members = [entry for entry in entries if entry.is_application == is_app]
+            if not members:
                 continue
-            item = QListWidgetItem(f"{name}  [{pid}]")
-            item.setData(Qt.ItemDataRole.UserRole, pid)
-            self._list.addItem(item)
+            group = QTreeWidgetItem(self._list, [f"{label}（{len(members)}）"])
+            group.setData(0, Qt.ItemDataRole.UserRole + 1, key)
+            group.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            group.setFirstColumnSpanned(True)
+            group.setSizeHint(0, QSize(0, 26))
+            font = group.font(0)
+            font.setBold(True)
+            group.setFont(0, font)
+            for entry in members:
+                title = entry.window_titles[0] if entry.window_titles else entry.name
+                item = QTreeWidgetItem(group, [title, entry.name, str(entry.pid)])
+                item.setData(0, Qt.ItemDataRole.UserRole, entry.pid)
+                item.setSizeHint(0, QSize(0, 26))
+                item.setTextAlignment(2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                tooltip = "\n".join((*entry.window_titles, entry.name, f"PID: {entry.pid}"))
+                for column in range(3):
+                    item.setToolTip(column, tooltip)
+                if entry.pid == selected_pid:
+                    restored = item
+            group.setExpanded(bool(needle) or self._group_expanded[key])
+        if restored is not None:
+            restored.parent().setExpanded(True)
+            self._list.setCurrentItem(restored)
+            self._list.scrollToItem(restored)
+        self._empty_label.setVisible(not entries)
+        self._update_selection()
+
+    def _selected_pid(self) -> int | None:
+        item = self._list.currentItem()
+        pid = item.data(0, Qt.ItemDataRole.UserRole) if item else None
+        return pid if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 else None
+
+    def _update_selection(self, *_args) -> None:
+        self._attach_btn.setEnabled(self._selected_pid() is not None)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
-    def _do_attach(self) -> None:
-        item = self._list.currentItem()
-        if not item:
+    def _do_attach(self, *_args) -> None:
+        pid = self._selected_pid()
+        if pid is None or not self._attach_btn.isEnabled():
             return
-        pid: int = item.data(Qt.ItemDataRole.UserRole)
+        self._attach_btn.setEnabled(False)
         if self._attach_fn(pid):
             self.accept()
         else:
-            QMessageBox.warning(self, "Attach failed", self._fail_msg.format(pid=pid))
+            QMessageBox.warning(self, "连接失败", self._fail_msg.format(pid=pid))
+            self._update_selection()
 
 
 # ---------------------------------------------------------------------------

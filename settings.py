@@ -4,7 +4,7 @@ import copy
 import math
 import os
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QDoubleSpinBox,
@@ -28,7 +29,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from config import Config, OverlayConfig, ROLE_PROVIDER_DEFAULTS, ROLE_MODEL_OPTIONS
+from config import (
+    Config, OverlayConfig, ROLE_PROVIDER_DEFAULTS, ROLE_MODEL_OPTIONS,
+    GAME_TITLE_MAX_LENGTH, GAME_NOTES_MAX_LENGTH, normalize_game_text,
+)
 from translator import _SYSTEM_PROMPT, _SUMMARIZE_SYSTEM, _DESCRIBE_SYSTEM
 
 
@@ -282,6 +286,7 @@ _BTN_SAVE = (
 
 # Display name → internal provider key
 _PROVIDER_KEY_MAP: dict[str, str] = {
+    "DeepSeek":  "deepseek",
     "Anthropic": "anthropic",
     "OpenAI":    "openai",
     "Google":    "google",
@@ -318,7 +323,7 @@ class SettingsDialog(QDialog):
     Dark-themed settings dialog opened from the overlay's gear button.
 
     Appearance changes (colors, opacity) are applied live to the overlay.
-    Backend changes are written to config on Save and take effect on next launch.
+    Non-appearance changes are applied by the save callback when Save is clicked.
     Cancel reverts all live appearance changes.
     """
 
@@ -334,9 +339,9 @@ class SettingsDialog(QDialog):
         # Snapshot current appearance so Cancel can revert exactly
         self._orig_overlay: OverlayConfig = copy.deepcopy(cfg.overlay)
 
-        self.setWindowTitle("VNTL Settings")
-        self.setMinimumWidth(520)
-        self.resize(540, 650)
+        self.setWindowTitle("VNTL 日译中设置")
+        self.setMinimumWidth(620)
+        self.resize(680, 760)
         self.setStyleSheet(_STYLE)
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint
@@ -356,10 +361,12 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
 
         for title, builder in [
-            ("Appearance",  self._build_appearance),
-            ("Translation", self._build_models_and_apis),
-            ("Context",     self._build_context),
-            ("Prompts",     self._build_prompts),
+            ("游戏",     self._build_game),
+            ("外观",     self._build_appearance),
+            ("接口与模型", self._build_models_and_apis),
+            ("手柄",     self._build_controller),
+            ("上下文",   self._build_context),
+            ("提示词",   self._build_prompts),
         ]:
             page = QWidget()
             page.setStyleSheet("background-color: transparent;")
@@ -368,12 +375,112 @@ class SettingsDialog(QDialog):
             lay.setContentsMargins(12, 12, 12, 12)
             builder(lay)
             lay.addStretch()
-            tabs.addTab(page, title)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setWidget(page)
+            tabs.addTab(scroll, title)
 
         root.addWidget(tabs)
         root.addWidget(_separator())
         self._build_buttons(root)
         self._fix_combo_popups()
+
+    def _build_game(self, parent: QVBoxLayout) -> None:
+        parent.addWidget(QLabel(f"当前游戏名称（最多 {GAME_TITLE_MAX_LENGTH} 字）："))
+        self._game_title_edit = QLineEdit()
+        self._game_title_edit.setMaxLength(GAME_TITLE_MAX_LENGTH)
+        self._game_title_edit.setPlaceholderText("填写当前正在玩的作品名称，可留空")
+        self._game_title_edit.setText(normalize_game_text(self._cfg.game_title, GAME_TITLE_MAX_LENGTH))
+        parent.addWidget(self._game_title_edit)
+
+        parent.addWidget(QLabel("补充说明（可选）："))
+        self._game_notes_edit = QTextEdit()
+        self._game_notes_edit.setAcceptRichText(False)
+        self._game_notes_edit.setPlaceholderText(
+            "可填写当前篇章、游戏版本，以及翻译偏好，例如：游戏角色名不翻译、术语固定译法、对白语气。"
+        )
+        self._game_notes_edit.setMinimumHeight(180)
+        self._game_notes_edit.setPlainText(normalize_game_text(self._cfg.game_notes, GAME_NOTES_MAX_LENGTH))
+        parent.addWidget(self._game_notes_edit)
+        self._game_notes_count_label = QLabel()
+        self._game_notes_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        parent.addWidget(self._game_notes_count_label)
+        self._game_notes_edit.textChanged.connect(self._on_game_notes_changed)
+        self._on_game_notes_changed()
+
+        instructions = QLabel(
+            "点击“保存”后从下一次请求生效。补充说明中的翻译偏好优先于默认翻译规则和旧译文。"
+            "已经显示的译文不会自动修改；点击 ↻ 可按新偏好重新翻译当前已识别的日文。\n\n"
+            "游戏资料会用于识屏、翻译和剧情摘要，但不覆盖画面原文或算作已读剧情；"
+            "模型仍以当前画面及已读内容为依据，不凭作品知识补写剧情。\n\n"
+            "修改游戏信息不会清空已读记忆。切换作品或路线时，请清空剧情记忆，"
+            "或载入对应的记忆文件。"
+        )
+        instructions.setWordWrap(True)
+        parent.addWidget(instructions)
+
+    def _on_game_notes_changed(self) -> None:
+        text = self._game_notes_edit.toPlainText()
+        if len(text) > GAME_NOTES_MAX_LENGTH:
+            position = self._game_notes_edit.textCursor().position()
+            self._game_notes_edit.blockSignals(True)
+            try:
+                text = text[:GAME_NOTES_MAX_LENGTH]
+                self._game_notes_edit.setPlainText(text)
+                cursor = self._game_notes_edit.textCursor()
+                cursor.setPosition(min(position, self._game_notes_edit.document().characterCount() - 1))
+                self._game_notes_edit.setTextCursor(cursor)
+            finally:
+                self._game_notes_edit.blockSignals(False)
+        self._game_notes_count_label.setText(f"{len(text)} / {GAME_NOTES_MAX_LENGTH} 字")
+
+    def _build_controller(self, parent: QVBoxLayout) -> None:
+        self._controller_enabled_check = QCheckBox("启用 Switch2 Pro 背键翻译")
+        self._controller_enabled_check.setChecked(self._cfg.controller_enabled)
+        parent.addWidget(self._controller_enabled_check)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("翻译按键："))
+        self._controller_button_combo = QComboBox()
+        self._controller_button_combo.addItem("GR · 右背键", "GR")
+        self._controller_button_combo.addItem("GL · 左背键", "GL")
+        index = self._controller_button_combo.findData(self._cfg.controller_button)
+        self._controller_button_combo.setCurrentIndex(max(0, index))
+        self._controller_button_combo.setEnabled(self._controller_enabled_check.isChecked())
+        self._controller_enabled_check.toggled.connect(self._controller_button_combo.setEnabled)
+        row.addWidget(self._controller_button_combo)
+        row.addStretch()
+        parent.addLayout(row)
+
+        instructions = QLabel(
+            "请通过 USB 连接 Switch2 Pro 手柄，并使用手柄上已启用的背键。\n\n"
+            "按下一次翻译当前游戏画面，长按不会连续触发。背键直接触发翻译，不发送键盘按键。\n\n"
+            "这里只读取现有背键状态，不会更改手柄或游戏的按键映射。点击“保存”后立即生效。"
+        )
+        instructions.setWordWrap(True)
+        parent.addWidget(instructions)
+        parent.addWidget(_separator())
+
+        parent.addWidget(QLabel("当前连接状态："))
+        self._controller_status_label = QLabel()
+        self._controller_status_label.setWordWrap(True)
+        self._controller_status_label.setToolTip("显示当前运行状态；修改设置后请点击保存。")
+        parent.addWidget(self._controller_status_label)
+        self._refresh_controller_status()
+        self._controller_status_timer = QTimer(self)
+        self._controller_status_timer.setInterval(1000)
+        self._controller_status_timer.timeout.connect(self._refresh_controller_status)
+        self.finished.connect(self._controller_status_timer.stop)
+        self._controller_status_timer.start()
+
+    def _refresh_controller_status(self) -> None:
+        status_fn = getattr(self._overlay, "controller_status_fn", None)
+        try:
+            status = status_fn() if callable(status_fn) else "手柄状态暂不可用。"
+        except Exception:
+            status = "暂时无法读取手柄状态，请稍后重试。"
+        self._controller_status_label.setText(str(status or "手柄状态暂不可用。"))
 
     def _fix_combo_popups(self) -> None:
         """Force every QComboBox popup in the dialog to be opaque dark."""
@@ -393,9 +500,21 @@ class SettingsDialog(QDialog):
             view.setPalette(p)
 
     def _build_appearance(self, parent: QVBoxLayout) -> None:
+        self._jp_furigana_check = QCheckBox("日文汉字上方显示假名注音")
+        self._jp_furigana_check.setChecked(self._cfg.overlay.jp_furigana_enabled)
+        self._jp_furigana_check.toggled.connect(self._on_furigana_changed)
+        parent.addWidget(self._jp_furigana_check)
+        furigana_hint = QLabel(
+            "在本地自动生成平假名注音，不增加模型请求。人名、地名和特殊读法可能不准确。"
+        )
+        furigana_hint.setWordWrap(True)
+        furigana_hint.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(furigana_hint)
+        parent.addWidget(_separator())
+
         # Opacity slider
         row = QHBoxLayout()
-        lbl = QLabel("Background opacity:")
+        lbl = QLabel("背景不透明度：")
         lbl.setFixedWidth(165)
         row.addWidget(lbl)
 
@@ -414,22 +533,22 @@ class SettingsDialog(QDialog):
 
         # Color rows
         self._bg_btn = self._add_color_row(
-            parent, "Background color:", self._cfg.overlay.bg_color,
+            parent, "背景颜色：", self._cfg.overlay.bg_color,
             self._set_bg_color,
         )
         self._jp_btn = self._add_color_row(
-            parent, "Japanese text color:", self._cfg.overlay.jp_color,
+            parent, "日文颜色：", self._cfg.overlay.jp_color,
             self._set_jp_color,
         )
         self._en_btn = self._add_color_row(
-            parent, "English text color:", self._cfg.overlay.en_color,
+            parent, "中文译文颜色：", self._cfg.overlay.en_color,
             self._set_en_color,
         )
 
         # Font rows
         for attr_family, attr_size, row_label in [
-            ("jp_font_family", "jp_font_size", "Japanese font:"),
-            ("en_font_family", "en_font_size", "English font:"),
+            ("jp_font_family", "jp_font_size", "日文字体："),
+            ("en_font_family", "en_font_size", "中文译文字体："),
         ]:
             row = QHBoxLayout()
             lbl = QLabel(row_label)
@@ -477,13 +596,14 @@ class SettingsDialog(QDialog):
 
     def _build_context(self, parent: QVBoxLayout) -> None:
         # Clipboard toggle
-        self._clipboard_check = QCheckBox("Translate from clipboard")
+        self._clipboard_check = QCheckBox("自动翻译剪贴板文字")
         self._clipboard_check.setChecked(self._cfg.clipboard_enabled)
         parent.addWidget(self._clipboard_check)
 
         cb_note = QLabel(
-            "Disable if you copy text while reading and don't want it auto-translated."
+            "如果只想按需截图翻译，可关闭此项，避免复制文字时自动翻译。"
         )
+        cb_note.setWordWrap(True)
         cb_note.setStyleSheet(
             "color: rgba(160,160,160,180); font-size: 8pt; font-style: italic;"
         )
@@ -491,15 +611,16 @@ class SettingsDialog(QDialog):
 
         # Screenshot toggle
         self._screenshot_check = QCheckBox(
-            "Screenshot context  (descriptor model must support vision)"
+            "辅助场景描述（截图模型须支持视觉）"
         )
         self._screenshot_check.setChecked(self._cfg.screenshot_enabled)
         parent.addWidget(self._screenshot_check)
 
         sc_note = QLabel(
-            "~500\u2013800 extra tokens per new scene. "
-            "Use \u2018Attach screenshot window\u2026\u2019 in the right-click menu to select the game window."
+            "为已提取的台词附加画面信息。请先在右键菜单中绑定游戏截图窗口；"
+            "按需截图读字使用“截图翻译”按钮。"
         )
+        sc_note.setWordWrap(True)
         sc_note.setStyleSheet(
             "color: rgba(160,160,160,180); font-size: 8pt; font-style: italic;"
         )
@@ -508,7 +629,7 @@ class SettingsDialog(QDialog):
         # Scene change threshold slider
         parent.addSpacing(4)
         thresh_row = QHBoxLayout()
-        lbl_thresh = QLabel("Scene change threshold:")
+        lbl_thresh = QLabel("场景变化阈值：")
         lbl_thresh.setFixedWidth(165)
         thresh_row.addWidget(lbl_thresh)
 
@@ -530,21 +651,22 @@ class SettingsDialog(QDialog):
         )
         parent.addLayout(thresh_row)
 
-        thresh_note = QLabel("Log scale: 0 = always, pos~33 = 1% (expressions), pos~50 = 3% (sprites), pos~67 = 10% (transitions).")
+        thresh_note = QLabel("数值越小越敏感。约 1% 可捕捉表情变化，3% 用于人物变化，10% 用于场景切换。")
+        thresh_note.setWordWrap(True)
         thresh_note.setStyleSheet(
             "color: rgba(160,160,160,180); font-size: 8pt; font-style: italic;"
         )
         parent.addWidget(thresh_note)
 
         cooldown_row = QHBoxLayout()
-        cooldown_lbl = QLabel("Scene change cooldown:")
+        cooldown_lbl = QLabel("场景识别间隔：")
         cooldown_lbl.setFixedWidth(165)
         cooldown_row.addWidget(cooldown_lbl)
         self._scene_cooldown_spin = QDoubleSpinBox()
         self._scene_cooldown_spin.setRange(0.0, 10.0)
         self._scene_cooldown_spin.setSingleStep(0.5)
         self._scene_cooldown_spin.setDecimals(1)
-        self._scene_cooldown_spin.setSuffix(" s")
+        self._scene_cooldown_spin.setSuffix(" 秒")
         self._scene_cooldown_spin.setValue(self._cfg.scene_change_cooldown)
         self._scene_cooldown_spin.setMaximumWidth(90)
         cooldown_row.addWidget(self._scene_cooldown_spin)
@@ -555,7 +677,7 @@ class SettingsDialog(QDialog):
 
         # Summarize-at-tokens
         tok_row = QHBoxLayout()
-        lbl = QLabel("Summarize context at:")
+        lbl = QLabel("开始整理记忆的阈值：")
         lbl.setFixedWidth(165)
         tok_row.addWidget(lbl)
         self._summ_spin = QSpinBox()
@@ -570,7 +692,7 @@ class SettingsDialog(QDialog):
 
         # Summary target size
         sum_tok_row = QHBoxLayout()
-        lbl_st = QLabel("Summary target size:")
+        lbl_st = QLabel("摘要目标长度：")
         lbl_st.setFixedWidth(165)
         sum_tok_row.addWidget(lbl_st)
         self._summary_tokens_spin = QSpinBox()
@@ -585,26 +707,34 @@ class SettingsDialog(QDialog):
 
         # Min recent lines
         lines_row = QHBoxLayout()
-        lbl2 = QLabel("Keep verbatim lines:")
+        lbl2 = QLabel("保留最近完整对话：")
         lbl2.setFixedWidth(165)
         lines_row.addWidget(lbl2)
         self._lines_spin = QSpinBox()
         self._lines_spin.setRange(5, 100)
         self._lines_spin.setValue(self._cfg.context_min_recent_lines)
         lines_row.addWidget(self._lines_spin)
-        lines_row.addWidget(QLabel("lines"))
+        lines_row.addWidget(QLabel("条"))
         lines_row.addStretch()
         parent.addLayout(lines_row)
+        summary_note = QLabel(
+            "达到 token 阈值且有较早对话可整理时，本次翻译结束后立即在后台整理记忆，"
+            "不等待下一条翻译，也不占用字幕位置。最近的指定条数保留完整内容。"
+            "整理失败会保留原记忆，不会在空闲时连续重试。"
+        )
+        summary_note.setWordWrap(True)
+        summary_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(summary_note)
 
         # Line batch window
         batch_row = QHBoxLayout()
-        batch_lbl = QLabel("Line batch window:")
+        batch_lbl = QLabel("台词合并等待时间：")
         batch_lbl.setFixedWidth(165)
         batch_row.addWidget(batch_lbl)
         self._batch_win_spin = QSpinBox()
         self._batch_win_spin.setRange(0, 2000)
         self._batch_win_spin.setSingleStep(50)
-        self._batch_win_spin.setSuffix(" ms")
+        self._batch_win_spin.setSuffix(" 毫秒")
         self._batch_win_spin.setValue(self._cfg.line_batch_window_ms)
         self._batch_win_spin.setMaximumWidth(100)
         batch_row.addWidget(self._batch_win_spin)
@@ -613,13 +743,13 @@ class SettingsDialog(QDialog):
 
         # Text debounce
         debounce_row = QHBoxLayout()
-        debounce_lbl = QLabel("Text debounce:")
+        debounce_lbl = QLabel("逐字显示等待时间：")
         debounce_lbl.setFixedWidth(165)
         debounce_row.addWidget(debounce_lbl)
         self._debounce_spin = QSpinBox()
         self._debounce_spin.setRange(10, 2000)
         self._debounce_spin.setSingleStep(10)
-        self._debounce_spin.setSuffix(" ms")
+        self._debounce_spin.setSuffix(" 毫秒")
         self._debounce_spin.setValue(self._cfg.debounce_ms)
         self._debounce_spin.setMaximumWidth(100)
         debounce_row.addWidget(self._debounce_spin)
@@ -628,42 +758,47 @@ class SettingsDialog(QDialog):
 
 
     def _build_models_and_apis(self, parent: QVBoxLayout) -> None:
-        # --- API Keys subsection ---
-        parent.addWidget(_subsection_label("API Keys"))
+        # --- API 密钥（只需填写使用的服务商） subsection ---
+        parent.addWidget(_subsection_label("API 密钥（只需填写使用的服务商）"))
 
         parent.addLayout(self._input_row(
-            "Anthropic key:", self._cfg.anthropic_api_key,
+            "DeepSeek 密钥：", self._cfg.deepseek_api_key,
+            password=True, dest="_deepseek_key_edit",
+        ))
+        parent.addLayout(self._input_row(
+            "Anthropic 密钥：", self._cfg.anthropic_api_key,
             password=True, dest="_anthropic_key_edit",
         ))
         parent.addLayout(self._input_row(
-            "OpenAI key:", self._cfg.openai_api_key,
+            "OpenAI 密钥：", self._cfg.openai_api_key,
             password=True, dest="_openai_key_edit",
         ))
         parent.addLayout(self._input_row(
-            "Google key:", self._cfg.google_api_key,
+            "Google 密钥：", self._cfg.google_api_key,
             password=True, dest="_google_key_edit",
         ))
         parent.addLayout(self._input_row(
-            "Ollama URL:", self._cfg.ollama_base_url,
+            "Ollama 地址：", self._cfg.ollama_base_url,
             password=False, dest="_ollama_url_edit",
         ))
 
         parent.addSpacing(6)
 
         # --- Roles subsection ---
-        parent.addWidget(_subsection_label("Roles  (provider + model)"))
+        parent.addWidget(_subsection_label("用途（服务商 + 模型）"))
 
         self._role_combos:        dict[str, QComboBox]      = {}
         self._role_model_combos:  dict[str, QComboBox]      = {}
         self._role_model_edits:   dict[str, QLineEdit]      = {}
         self._role_model_stacks:  dict[str, QStackedWidget] = {}
         self._role_think_checks:  dict[str, QCheckBox]      = {}
+        self._role_google_thinking_combos: dict[str, QComboBox] = {}
         self._role_max_tokens_spins: dict[str, QSpinBox]    = {}
 
         for role_key, label, provider_attr, model_attr, thinking_attr in [
-            ("translator", "Translator:", "translator_provider", "translator_model", "translator_ollama_thinking"),
-            ("descriptor", "Descriptor:", "descriptor_provider", "descriptor_model", "descriptor_ollama_thinking"),
-            ("summarizer", "Summarizer:", "summarizer_provider", "summarizer_model", "summarizer_ollama_thinking"),
+            ("translator", "日译中：", "translator_provider", "translator_model", "translator_ollama_thinking"),
+            ("descriptor", "截图 / OCR：", "descriptor_provider", "descriptor_model", "descriptor_ollama_thinking"),
+            ("summarizer", "剧情摘要：", "summarizer_provider", "summarizer_model", "summarizer_ollama_thinking"),
         ]:
             provider_val = getattr(self._cfg, provider_attr)
             model_val    = getattr(self._cfg, model_attr)
@@ -678,29 +813,33 @@ class SettingsDialog(QDialog):
             # Provider combo
             prov_combo = QComboBox()
             prov_combo.addItems(_PROVIDERS)
+            prov_combo.setStyleSheet("QComboBox { min-width: 88px; }")
             prov_combo.setFixedWidth(110)
             display = next(
                 (k for k, v in _PROVIDER_KEY_MAP.items() if v == provider_val),
-                "Anthropic",
+                "DeepSeek",
             )
             prov_combo.setCurrentText(display)
             row.addWidget(prov_combo)
 
             # Model combo (page 0 of stack)
             model_combo = QComboBox()
+            model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            model_combo.setMinimumContentsLength(20)
+            model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             model_combo.addItems(options)
-            model_combo.addItem("Other\u2026")
+            model_combo.addItem("其他模型…")
 
             # Other text field (page 1 of stack)
             model_edit = QLineEdit()
-            model_edit.setPlaceholderText("Enter model name\u2026")
+            model_edit.setPlaceholderText("输入模型名称…")
 
             # Choose initial stack page
             if model_val in options:
                 model_combo.setCurrentText(model_val)
                 initial_idx = 0
             else:
-                model_combo.setCurrentText("Other\u2026")
+                model_combo.setCurrentText("其他模型…")
                 model_edit.setText(model_val)
                 initial_idx = 1
 
@@ -709,29 +848,44 @@ class SettingsDialog(QDialog):
             stack.addWidget(model_edit)
             stack.setCurrentIndex(initial_idx)
             stack.setFixedHeight(prov_combo.sizeHint().height())
-            row.addWidget(stack)
+            stack.setMinimumWidth(180)
+            row.addWidget(stack, 1)
 
-            think_check = QCheckBox("Think")
+            think_check = QCheckBox("Ollama 思考")
             think_check.setChecked(getattr(self._cfg, thinking_attr))
             think_check.setEnabled(provider_val == "ollama")
-            row.addWidget(think_check)
+            think_check.setToolTip("仅对 Ollama 生效；开启后可能增加响应时间。DeepSeek 默认关闭思考以加快翻译。")
 
             parent.addLayout(row)
 
             # Max output tokens sub-row (indented under the provider/model row)
             tok_row = QHBoxLayout()
-            spacer = QLabel()
-            spacer.setFixedWidth(90)
-            tok_row.addWidget(spacer)
-            lbl_tok = QLabel("Max output tokens:")
-            lbl_tok.setFixedWidth(130)
+            tok_row.addSpacing(12)
+            lbl_tok = QLabel("最大输出长度：")
+            lbl_tok.setFixedWidth(100)
             tok_row.addWidget(lbl_tok)
             tok_spin = QSpinBox()
             tok_spin.setRange(128, 16384)
             tok_spin.setSingleStep(128)
             tok_spin.setValue(getattr(self._cfg, f"{role_key}_max_tokens"))
             tok_spin.setMaximumWidth(80)
+            tok_spin.setToolTip("单次输出的 token 上限。增加上限不会自动生成更多内容。")
             tok_row.addWidget(tok_spin)
+            google_label = QLabel("Google 思考：")
+            tok_row.addWidget(google_label)
+            google_combo = QComboBox()
+            for display_label, value in (("低", "low"), ("中", "medium"), ("高", "high")):
+                google_combo.addItem(display_label, value)
+            default_level = "medium" if role_key == "translator" else "low"
+            current_level = getattr(self._cfg, f"{role_key}_google_thinking_level", default_level)
+            level_index = google_combo.findData(current_level)
+            google_combo.setCurrentIndex(level_index if level_index >= 0 else google_combo.findData(default_level))
+            google_combo.setEnabled(provider_val == "google")
+            google_combo.setStyleSheet("QComboBox { min-width: 42px; }")
+            google_combo.setFixedWidth(74)
+            google_combo.setToolTip("仅对 Google Gemini 生效。低档更快，高档可增加推理时间与费用。")
+            tok_row.addWidget(google_combo)
+            tok_row.addWidget(think_check)
             tok_row.addStretch()
             parent.addLayout(tok_row)
 
@@ -740,13 +894,14 @@ class SettingsDialog(QDialog):
             self._role_model_edits[role_key]     = model_edit
             self._role_model_stacks[role_key]    = stack
             self._role_think_checks[role_key]    = think_check
+            self._role_google_thinking_combos[role_key] = google_combo
             self._role_max_tokens_spins[role_key] = tok_spin
 
             # Switch to text field when "Other…" is selected
             def _on_model_combo_changed(
                 text: str, stk: QStackedWidget = stack, edit: QLineEdit = model_edit,
             ) -> None:
-                if text == "Other\u2026":
+                if text == "其他模型…":
                     stk.setCurrentIndex(1)
                     edit.clear()
                     edit.setFocus()
@@ -761,35 +916,23 @@ class SettingsDialog(QDialog):
                 edit: QLineEdit      = model_edit,
                 rk:   str            = role_key,
                 chk:  QCheckBox      = think_check,
+                gc:   QComboBox      = google_combo,
             ) -> None:
-                new_internal = _PROVIDER_KEY_MAP.get(text, "anthropic")
+                new_internal = _PROVIDER_KEY_MAP.get(text, "deepseek")
                 chk.setEnabled(new_internal == "ollama")
+                gc.setEnabled(new_internal == "google")
                 new_options  = ROLE_MODEL_OPTIONS.get(rk, {}).get(new_internal, [])
                 new_default  = ROLE_PROVIDER_DEFAULTS.get(rk, {}).get(new_internal, "")
-                all_defaults = {
-                    v for rd in ROLE_PROVIDER_DEFAULTS.values() for v in rd.values()
-                }
+                current = edit.text().strip() if stk.currentIndex() == 1 else mc.currentText()
 
                 mc.blockSignals(True)
                 mc.clear()
                 mc.addItems(new_options)
-                mc.addItem("Other\u2026")
+                mc.addItem("其他模型…")
                 mc.blockSignals(False)
 
-                if stk.currentIndex() == 1:
-                    # Other mode: switch back to combo if typed value is now an option
-                    current = edit.text().strip()
-                    if current in new_options:
-                        mc.setCurrentText(current)
-                        stk.setCurrentIndex(0)
-                else:
-                    current = mc.currentText()
-                    if (current == "" or current == "Other\u2026"
-                            or current in all_defaults
-                            or current not in new_options):
-                        if new_default in new_options:
-                            mc.setCurrentText(new_default)
-                        stk.setCurrentIndex(0)
+                mc.setCurrentText(current if current in new_options else new_default)
+                stk.setCurrentIndex(0)
 
             prov_combo.currentTextChanged.connect(_on_provider_changed)
 
@@ -814,16 +957,16 @@ class SettingsDialog(QDialog):
     def _build_prompts(self, parent: QVBoxLayout) -> None:
         """Build the Prompts tab with one QTextEdit per LLM role."""
         _roles = [
-            ("Translator",  "translator_system_prompt", _SYSTEM_PROMPT,    "_translator_prompt_edit"),
-            ("Descriptor",  "descriptor_system_prompt", _DESCRIBE_SYSTEM,  "_descriptor_prompt_edit"),
-            ("Summarizer",  "summarizer_system_prompt", _SUMMARIZE_SYSTEM, "_summarizer_prompt_edit"),
+            ("日译中",  "translator_system_prompt", _SYSTEM_PROMPT,    "_translator_prompt_edit"),
+            ("场景描述",  "descriptor_system_prompt", _DESCRIBE_SYSTEM,  "_descriptor_prompt_edit"),
+            ("剧情摘要",  "summarizer_system_prompt", _SUMMARIZE_SYSTEM, "_summarizer_prompt_edit"),
         ]
         for display_name, cfg_attr, default_text, widget_attr in _roles:
             hdr = QHBoxLayout()
             lbl = QLabel(f"<b>{display_name}</b>")
             hdr.addWidget(lbl)
             hdr.addStretch()
-            reset_btn = QPushButton("Reset to default")
+            reset_btn = QPushButton("恢复默认")
             reset_btn.setFixedHeight(24)
             hdr.addWidget(reset_btn)
             parent.addLayout(hdr)
@@ -844,12 +987,12 @@ class SettingsDialog(QDialog):
         row = QHBoxLayout()
         row.addStretch()
 
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton("取消")
         cancel.setStyleSheet(_BTN_ACTION)
         cancel.clicked.connect(self._on_cancel)
         row.addWidget(cancel)
 
-        save = QPushButton("Save")
+        save = QPushButton("保存")
         save.setStyleSheet(_BTN_SAVE)
         save.clicked.connect(self._on_save)
         row.addWidget(save)
@@ -878,7 +1021,7 @@ class SettingsDialog(QDialog):
         color = QColorDialog.getColor(
             QColor(r, g, b, a),
             self,
-            "Pick Color",
+            "选择颜色",
             QColorDialog.ColorDialogOption.ShowAlphaChannel,
         )
         if color.isValid():
@@ -887,6 +1030,10 @@ class SettingsDialog(QDialog):
             self._refresh_swatch(btn, new)
 
     # Font setter — mutate cfg and push live to overlay
+    def _on_furigana_changed(self, enabled: bool) -> None:
+        self._cfg.overlay.jp_furigana_enabled = enabled
+        self._overlay.apply_appearance(self._cfg.overlay)
+
     def _on_font_changed(self, attr: str, value) -> None:
         setattr(self._cfg.overlay, attr, value)
         self._overlay.apply_appearance(self._cfg.overlay)
@@ -915,7 +1062,16 @@ class SettingsDialog(QDialog):
         self._overlay.apply_appearance(self._cfg.overlay)
 
     def _on_save(self) -> None:
+        self._cfg.game_title = normalize_game_text(self._game_title_edit.text(), GAME_TITLE_MAX_LENGTH)
+        self._cfg.game_notes = normalize_game_text(self._game_notes_edit.toPlainText(), GAME_NOTES_MAX_LENGTH)
+
+        # Controller edits stay local to the dialog until Save is clicked.
+        self._cfg.controller_enabled = self._controller_enabled_check.isChecked()
+        selected_button = self._controller_button_combo.currentData()
+        self._cfg.controller_button = selected_button if selected_button in ("GR", "GL") else "GR"
+
         # API keys
+        self._cfg.deepseek_api_key  = self._deepseek_key_edit.text().strip()
         self._cfg.anthropic_api_key = self._anthropic_key_edit.text().strip()
         self._cfg.openai_api_key    = self._openai_key_edit.text().strip()
         self._cfg.google_api_key    = self._google_key_edit.text().strip()
@@ -928,19 +1084,21 @@ class SettingsDialog(QDialog):
             ("summarizer", "summarizer_provider", "summarizer_model", "summarizer_ollama_thinking", "summarizer_max_tokens"),
         ]:
             combo_text = self._role_combos[role_key].currentText()
-            internal   = _PROVIDER_KEY_MAP.get(combo_text, "anthropic")
+            internal   = _PROVIDER_KEY_MAP.get(combo_text, "deepseek")
             stack      = self._role_model_stacks[role_key]
             if stack.currentIndex() == 1:
                 model_val = self._role_model_edits[role_key].text().strip()
             else:
                 model_val = self._role_model_combos[role_key].currentText()
-                if not model_val or model_val == "Other\u2026":
+                if not model_val or model_val == "其他模型…":
                     model_val = ""
             if not model_val:
                 model_val = ROLE_PROVIDER_DEFAULTS.get(role_key, {}).get(internal, "")
             setattr(self._cfg, provider_attr, internal)
             setattr(self._cfg, model_attr,    model_val)
             setattr(self._cfg, thinking_attr, self._role_think_checks[role_key].isChecked())
+            setattr(self._cfg, f"{role_key}_google_thinking_level",
+                    self._role_google_thinking_combos[role_key].currentData())
             setattr(self._cfg, tokens_attr,   self._role_max_tokens_spins[role_key].value())
 
         # Context settings
@@ -967,9 +1125,13 @@ class SettingsDialog(QDialog):
             self._screenshot_service.cooldown = cooldown
 
         # System prompts (empty string = use built-in default)
-        self._cfg.translator_system_prompt = self._translator_prompt_edit.toPlainText().strip()
-        self._cfg.descriptor_system_prompt = self._descriptor_prompt_edit.toPlainText().strip()
-        self._cfg.summarizer_system_prompt = self._summarizer_prompt_edit.toPlainText().strip()
+        for attr, edit, default in (
+            ("translator_system_prompt", self._translator_prompt_edit, _SYSTEM_PROMPT),
+            ("descriptor_system_prompt", self._descriptor_prompt_edit, _DESCRIBE_SYSTEM),
+            ("summarizer_system_prompt", self._summarizer_prompt_edit, _SUMMARIZE_SYSTEM),
+        ):
+            value = edit.toPlainText().strip()
+            setattr(self._cfg, attr, "" if value == default.strip() else value)
 
         # Appearance is already live in cfg.overlay — write everything to disk
         self._save_fn(self._cfg)
@@ -979,7 +1141,10 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _on_cancel(self) -> None:
-        # Restore appearance to the state at dialog open
+        self.reject()
+
+    def reject(self) -> None:
+        # Cancel, Escape and the window close button all discard live previews.
         self._cfg.overlay = copy.deepcopy(self._orig_overlay)
         self._overlay.apply_appearance(self._cfg.overlay)
-        self.reject()
+        super().reject()

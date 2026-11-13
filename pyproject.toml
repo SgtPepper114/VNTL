@@ -9,6 +9,9 @@ dependencies = [
     "qasync",
     "mss",
     "pillow",
+    "hidapi>=0.14,<0.16",
+    "sudachipy==0.6.11",
+    "sudachidict-core==20260428",
 ]
 
 [dependency-groups]

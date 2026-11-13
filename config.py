@@ -3,45 +3,58 @@ import os
 from dataclasses import dataclass, field, asdict
 
 CONFIG_PATH = os.path.expanduser("~/.config/vntl/config.json")
+GAME_TITLE_MAX_LENGTH = 200
+GAME_NOTES_MAX_LENGTH = 4000
+
+
+def normalize_game_text(value: object, max_length: int) -> str:
+    """Keep user-provided game context as bounded plain text."""
+    return value.strip()[:max_length].rstrip() if isinstance(value, str) else ""
 
 ROLE_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "translator": {
-        "anthropic": "claude-sonnet-4-6",
+        "anthropic": "claude-sonnet-5-5",
         "openai":    "gpt-5.2",
-        "google":    "gemini-2.5-pro",
+        "google":    "gemini-3.8-flash",
+        "deepseek":  "deepseek-flash",
         "ollama":    "qwen3:14b",
     },
     "descriptor": {
         "anthropic": "claude-haiku-4-5",
         "openai":    "gpt-4o-mini",
-        "google":    "gemini-2.5-flash",
+        "google":    "gemini-3.8-flash",
+        "deepseek":  "deepseek-flash",
         "ollama":    "qwen2.5vl:7b",
     },
     "summarizer": {
         "anthropic": "claude-haiku-4-5",
         "openai":    "gpt-5-mini",
-        "google":    "gemini-2.5-flash",
+        "google":    "gemini-3.8-flash",
+        "deepseek":  "deepseek-flash",
         "ollama":    "qwen3:14b",
     },
 }
 
 ROLE_MODEL_OPTIONS: dict[str, dict[str, list[str]]] = {
     "translator": {
-        "anthropic": ["claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-6"],
+        "anthropic": ["claude-sonnet-5-5", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-opus-4-6"],
         "openai":    ["gpt-5.2", "gpt-5-mini", "gpt-4o"],
-        "google":    ["gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"],
+        "google":    ["gemini-3.8-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-2.5-flash"],
+        "deepseek":  ["deepseek-flash", "deepseek-v4-pro"],
         "ollama":    ["qwen3:14b", "mistral-small3.2:24b", "gemma3:12b"],
     },
     "descriptor": {
-        "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6"],
+        "anthropic": ["claude-sonnet-5-5", "claude-haiku-4-5", "claude-sonnet-4-5", "claude-sonnet-4-6"],
         "openai":    ["gpt-4o-mini", "gpt-4o", "gpt-5.2"],
-        "google":    ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-2.5-pro"],
+        "google":    ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-3-flash-preview", "gemini-2.5-pro"],
+        "deepseek":  ["deepseek-flash"],
         "ollama":    ["qwen2.5vl:7b", "gemma3:4b", "moondream"],
     },
     "summarizer": {
-        "anthropic": ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5"],
+        "anthropic": ["claude-sonnet-5-5", "claude-haiku-4-5", "claude-sonnet-4-6", "claude-sonnet-4-5"],
         "openai":    ["gpt-5-mini", "gpt-5.2", "gpt-5-nano"],
-        "google":    ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview"],
+        "google":    ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview"],
+        "deepseek":  ["deepseek-flash", "deepseek-v4-pro"],
         "ollama":    ["qwen3:14b", "gpt-oss:20b", "gemma3:12b"],
     },
 }
@@ -56,9 +69,10 @@ class OverlayConfig:
     bg_color: list = field(default_factory=lambda: [20, 20, 25, 210])
     jp_color: list = field(default_factory=lambda: [200, 200, 200, 180])
     en_color: list = field(default_factory=lambda: [255, 255, 255, 230])
-    jp_font_family: str = "Noto Sans CJK JP"
+    jp_font_family: str = "Yu Gothic"
     jp_font_size:   int = 10
-    en_font_family: str = "Noto Sans"
+    jp_furigana_enabled: bool = True
+    en_font_family: str = "Microsoft YaHei UI"
     en_font_size:   int = 13
 
 
@@ -68,23 +82,33 @@ class Config:
     anthropic_api_key: str = ""
     openai_api_key:    str = ""
     google_api_key:    str = ""
+    deepseek_api_key:  str = ""
     ollama_base_url:   str = "http://localhost:11434/v1"
 
-    # Per-role provider + model  ("anthropic" | "openai" | "google" | "ollama")
-    translator_provider: str = "anthropic"
-    translator_model:    str = "claude-sonnet-4-6"
-    descriptor_provider: str = "anthropic"
-    descriptor_model:    str = "claude-haiku-4-5"
-    summarizer_provider: str = "anthropic"
-    summarizer_model:    str = "claude-haiku-4-5"
+    # Per-role provider + model (anthropic | openai | google | deepseek | ollama).
+    translator_provider: str = "deepseek"
+    translator_model:    str = "deepseek-flash"
+    descriptor_provider: str = "deepseek"
+    descriptor_model:    str = "deepseek-flash"
+    summarizer_provider: str = "deepseek"
+    summarizer_model:    str = "deepseek-flash"
 
     # Per-role Ollama thinking mode (only applies when provider == "ollama")
     translator_ollama_thinking: bool = False
     descriptor_ollama_thinking:  bool = False
     summarizer_ollama_thinking:  bool = False
 
+    # Gemini's OpenAI-compatible endpoint maps these to its thinking level.
+    translator_google_thinking_level: str = "medium"
+    descriptor_google_thinking_level: str = "low"
+    summarizer_google_thinking_level: str = "low"
+
     screenshot_enabled: bool = False
     clipboard_enabled:  bool = False
+    game_title: str = ""
+    game_notes: str = ""
+    controller_enabled: bool = True
+    controller_button: str = "GR"
     context_summarize_tokens: int = 10_000
     context_min_recent_lines: int = 30
     summary_max_tokens:       int = 5_000
@@ -112,9 +136,11 @@ def load_config() -> Config:
     if not os.path.exists(CONFIG_PATH):
         return Config()
     try:
-        with open(CONFIG_PATH) as f:
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
             data = json.load(f)
         cfg = Config()
+        cfg.game_title = normalize_game_text(data.get("game_title", ""), GAME_TITLE_MAX_LENGTH)
+        cfg.game_notes = normalize_game_text(data.get("game_notes", ""), GAME_NOTES_MAX_LENGTH)
 
         # --- Migration: read legacy single-backend fields ---
         legacy_api_key      = data.get("api_key", "")
@@ -125,19 +151,29 @@ def load_config() -> Config:
         _backend_map = {"claude": "anthropic", "ollama": "ollama"}
         legacy_provider = _backend_map.get(legacy_backend, "anthropic")
         legacy_role_model = legacy_ollama_model if legacy_backend == "ollama" else legacy_model
+        has_legacy_backend = any(key in data for key in ("backend", "model", "api_key", "ollama_model"))
 
         # --- New fields (legacy values used only when new keys are absent) ---
         cfg.anthropic_api_key = data.get("anthropic_api_key", legacy_api_key)
         cfg.openai_api_key    = data.get("openai_api_key", "")
         cfg.google_api_key    = data.get("google_api_key", "")
+        cfg.deepseek_api_key  = data.get("deepseek_api_key", "")
         cfg.ollama_base_url   = data.get("ollama_base_url", "http://localhost:11434/v1")
 
-        cfg.translator_provider = data.get("translator_provider", legacy_provider)
-        cfg.translator_model    = data.get("translator_model", legacy_role_model)
-        cfg.descriptor_provider = data.get("descriptor_provider", legacy_provider)
-        cfg.descriptor_model    = data.get("descriptor_model", legacy_role_model)
-        cfg.summarizer_provider = data.get("summarizer_provider", legacy_provider)
-        cfg.summarizer_model    = data.get("summarizer_model", legacy_role_model)
+        for role in ("translator", "descriptor", "summarizer"):
+            provider_attr, model_attr = f"{role}_provider", f"{role}_model"
+            default_provider = legacy_provider if has_legacy_backend else getattr(cfg, provider_attr)
+            provider = data.get(provider_attr, default_provider)
+            default_model = (
+                legacy_role_model if has_legacy_backend and provider == legacy_provider
+                else ROLE_PROVIDER_DEFAULTS.get(role, {}).get(provider, getattr(cfg, model_attr))
+            )
+            setattr(cfg, provider_attr, provider)
+            setattr(cfg, model_attr, data.get(model_attr, default_model))
+            thinking_attr = f"{role}_google_thinking_level"
+            level = data.get(thinking_attr, getattr(cfg, thinking_attr))
+            if level in ("low", "medium", "high"):
+                setattr(cfg, thinking_attr, level)
 
         cfg.translator_ollama_thinking = data.get("translator_ollama_thinking", False)
         cfg.descriptor_ollama_thinking  = data.get("descriptor_ollama_thinking",  False)
@@ -145,7 +181,11 @@ def load_config() -> Config:
 
         cfg.screenshot_enabled        = data.get("screenshot_enabled", False)
         cfg.clipboard_enabled         = data.get("clipboard_enabled", False)
-        cfg.context_summarize_tokens  = data.get("context_summarize_tokens", 20_000)
+        controller_enabled = data.get("controller_enabled", True)
+        cfg.controller_enabled = controller_enabled if isinstance(controller_enabled, bool) else True
+        controller_button = data.get("controller_button", "GR")
+        cfg.controller_button = controller_button if controller_button in ("GR", "GL") else "GR"
+        cfg.context_summarize_tokens  = data.get("context_summarize_tokens", cfg.context_summarize_tokens)
         cfg.context_min_recent_lines  = data.get("context_min_recent_lines", 30)
         cfg.summary_max_tokens        = data.get("summary_max_tokens", 5_000)
         cfg.line_batch_window_ms      = data.get("line_batch_window_ms", 200)
@@ -153,8 +193,8 @@ def load_config() -> Config:
 
         cfg.translator_max_tokens  = data.get("translator_max_tokens", 2048)
         cfg.descriptor_max_tokens  = data.get("descriptor_max_tokens", 2048)
-        cfg.summarizer_max_tokens  = data.get("summarizer_max_tokens", 2048)
-        cfg.scene_change_threshold = float(data.get("scene_change_threshold", 15.0))
+        cfg.summarizer_max_tokens  = data.get("summarizer_max_tokens", cfg.summarizer_max_tokens)
+        cfg.scene_change_threshold = float(data.get("scene_change_threshold", cfg.scene_change_threshold))
         cfg.scene_change_cooldown  = float(data.get("scene_change_cooldown", 1.0))
 
         cfg.translator_system_prompt = data.get("translator_system_prompt", "")
@@ -163,6 +203,7 @@ def load_config() -> Config:
 
         if "overlay" in data:
             ov = data["overlay"]
+            furigana_enabled = ov.get("jp_furigana_enabled", True)
             cfg.overlay = OverlayConfig(
                 x=ov.get("x", 100),
                 y=ov.get("y", 100),
@@ -171,9 +212,10 @@ def load_config() -> Config:
                 bg_color=ov.get("bg_color", [20, 20, 25, 210]),
                 jp_color=ov.get("jp_color", [200, 200, 200, 180]),
                 en_color=ov.get("en_color", [255, 255, 255, 230]),
-                jp_font_family=ov.get("jp_font_family", "Noto Sans CJK JP"),
+                jp_font_family=ov.get("jp_font_family", "Yu Gothic"),
                 jp_font_size=ov.get("jp_font_size", 10),
-                en_font_family=ov.get("en_font_family", "Noto Sans"),
+                jp_furigana_enabled=furigana_enabled if isinstance(furigana_enabled, bool) else True,
+                en_font_family=ov.get("en_font_family", "Microsoft YaHei UI"),
                 en_font_size=ov.get("en_font_size", 13),
             )
         return cfg
@@ -183,5 +225,8 @@ def load_config() -> Config:
 
 def save_config(cfg: Config) -> None:
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(asdict(cfg), f, indent=2)
+    data = asdict(cfg)
+    data["game_title"] = normalize_game_text(cfg.game_title, GAME_TITLE_MAX_LENGTH)
+    data["game_notes"] = normalize_game_text(cfg.game_notes, GAME_NOTES_MAX_LENGTH)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)

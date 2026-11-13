@@ -12,10 +12,11 @@ hiddenimports = [
     'mss.windows',
 ]
 
-_d, _b, _h = collect_all('PyQt6')
-datas    += _d
-binaries += _b
-hiddenimports += _h
+for package in ('PyQt6', 'sudachipy', 'sudachidict_core'):
+    _d, _b, _h = collect_all(package)
+    datas    += _d
+    binaries += _b
+    hiddenimports += _h
 
 a = Analysis(
     ['main.py'],
