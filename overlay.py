@@ -18,6 +18,7 @@ from hooker import HookerService, StreamState
 from screenshot_service import ScreenshotService
 from ruby_label import RubyLabel
 from process_catalog import ProcessEntry, list_process_entries
+from background_layer import BackgroundLayer, FOREGROUND_KEY
 
 _NATIVE_WINDOW_OPACITY = sys.platform == "win32"
 
@@ -35,6 +36,8 @@ class _ResizeGrip(QWidget):
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if getattr(self.window(), "_background_layer", None) is not None:
+            painter.fillRect(self.rect(), QColor(34, 34, 45))
         color = QColor(180, 180, 180, 160)
         painter.setPen(color)
         w, h = self.width(), self.height()
@@ -412,6 +415,7 @@ class OverlayWindow(QWidget):
         self.is_busy = False
         self._observation_status_text = "等待选择游戏窗口"
         self.controller_status_fn = lambda: "手柄监听尚未启动"
+        self._background_layer = None
 
         self._setup_window()
         self._setup_ui()
@@ -419,6 +423,10 @@ class OverlayWindow(QWidget):
             cfg.overlay.x, cfg.overlay.y,
             cfg.overlay.width, cfg.overlay.height,
         )
+        if self._native_window_opacity:
+            self._background_layer = BackgroundLayer(self)
+            self._background_layer.set_color(cfg.overlay.bg_color)
+            self._background_layer.enable_foreground()
 
     # ------------------------------------------------------------------
     # Setup
@@ -433,12 +441,11 @@ class OverlayWindow(QWidget):
         )
         self._native_window_opacity = _NATIVE_WINDOW_OPACITY
         if self._native_window_opacity:
-            # Qt's per-pixel layered surface rejects capture exclusion on some
-            # Windows systems. An opaque backing with native window alpha keeps
-            # WDA_EXCLUDEFROMCAPTURE working without hide/show capture flicker.
+            # A color-key foreground and separate native-alpha backdrop preserve
+            # capture exclusion while keeping text independent of background alpha.
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
             self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
-            self.setWindowOpacity(self._cfg.overlay.bg_color[3] / 255)
+            self.setWindowOpacity(1.0)
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -864,8 +871,9 @@ class OverlayWindow(QWidget):
             f"font-family: '{ov.en_font_family}'; "
             f"font-size: {ov.en_font_size}pt;"
         )
-        if self._native_window_opacity:
-            self.setWindowOpacity(ov.bg_color[3] / 255)
+        if self._background_layer is not None:
+            self._background_layer.set_color(ov.bg_color)
+            self._background_layer.sync()
         self.update()  # repaint background
         if self._backlog_win is not None:
             self._backlog_win.refresh_appearance(ov)
@@ -1004,11 +1012,15 @@ class OverlayWindow(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r, g, b, a = self._cfg.overlay.bg_color
         if self._native_window_opacity:
-            # Fill even the rounded corners so the native backing is opaque.
-            # Alpha stays in the user's configuration; it is applied once by
-            # the window compositor, including the text and controls.
-            painter.fillRect(self.rect(), QColor(r, g, b, 255))
-            a = 255
+            # Qt paints opaque glyphs/controls onto a keyed matte. The separate
+            # backdrop carries the user's background opacity, including zero.
+            key_ready = self._background_layer and self._background_layer.enable_foreground()
+            painter.fillRect(self.rect(), QColor(*(FOREGROUND_KEY if key_ready else (r, g, b))))
+            # Preserve full button hit targets and a draggable control bar even
+            # when the subtitle background is completely transparent.
+            painter.fillRect(0, 0, self.width(), 32, QColor(34, 34, 45))
+            painter.end()
+            return
         painter.setBrush(QColor(r, g, b, a))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(self.rect(), 8, 8)
@@ -1042,6 +1054,8 @@ class OverlayWindow(QWidget):
     def moveEvent(self, event) -> None:
         super().moveEvent(event)
         self.save_geometry_to_config()
+        if self._background_layer is not None:
+            self._background_layer.sync()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -1049,6 +1063,25 @@ class OverlayWindow(QWidget):
         self._position_top_buttons()
         self._position_scene_diff_label()
         self._position_summ_label()
+        if self._background_layer is not None:
+            self._background_layer.sync()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._background_layer is not None:
+            self._background_layer.sync()
+
+    def hideEvent(self, event) -> None:
+        if self._background_layer is not None:
+            self._background_layer.hide()
+        super().hideEvent(event)
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.ActivationChange, QEvent.Type.WindowStateChange):
+            layer = getattr(self, "_background_layer", None)
+            if layer is not None:
+                layer.sync()
 
 
 # ---------------------------------------------------------------------------

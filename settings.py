@@ -4,7 +4,7 @@ import copy
 import math
 import os
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QSignalBlocker
 from PyQt6.QtGui import QColor, QFont, QPalette
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -515,24 +515,29 @@ class SettingsDialog(QDialog):
 
         # Opacity slider
         row = QHBoxLayout()
-        lbl = QLabel("浮窗整体不透明度：" if os.name == "nt" else "背景不透明度：")
-        if os.name == "nt":
-            lbl.setToolTip("Windows 下会同时调整背景、文字和按钮的透明度。")
+        lbl = QLabel("背景不透明度：")
         lbl.setFixedWidth(165)
         row.addWidget(lbl)
 
         self._opacity_slider = QSlider(Qt.Orientation.Horizontal)
         self._opacity_slider.setRange(0, 100)
-        self._opacity_slider.setValue(int(self._cfg.overlay.bg_color[3] / 255 * 100))
+        self._opacity_slider.setValue(round(self._cfg.overlay.bg_color[3] / 255 * 100))
         row.addWidget(self._opacity_slider)
 
-        self._opacity_lbl = QLabel(f"{int(self._cfg.overlay.bg_color[3] / 255 * 100)}%")
+        self._opacity_lbl = QLabel(f"{self._opacity_slider.value()}%")
         self._opacity_lbl.setFixedWidth(36)
         self._opacity_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self._opacity_lbl)
 
         self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
         parent.addLayout(row)
+        opacity_hint = QLabel(
+            "0% 为字幕背景完全透明，100% 为背景完全不透明。文字和按钮保持自身颜色，"
+            "顶部控制栏可用于拖动和打开设置。"
+        )
+        opacity_hint.setWordWrap(True)
+        opacity_hint.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(opacity_hint)
 
         # Color rows
         self._bg_btn = self._add_color_row(
@@ -1141,6 +1146,11 @@ class SettingsDialog(QDialog):
     # Color setters — mutate cfg and push live to overlay
     def _set_bg_color(self, c: list[int]) -> None:
         self._cfg.overlay.bg_color = c
+        value = round(c[3] / 255 * 100)
+        # Preserve the color picker's exact alpha while updating its percentage.
+        with QSignalBlocker(self._opacity_slider):
+            self._opacity_slider.setValue(value)
+        self._opacity_lbl.setText(f"{value}%")
         self._overlay.apply_appearance(self._cfg.overlay)
 
     def _set_jp_color(self, c: list[int]) -> None:
@@ -1157,7 +1167,7 @@ class SettingsDialog(QDialog):
 
     def _on_opacity_changed(self, value: int) -> None:
         self._opacity_lbl.setText(f"{value}%")
-        self._cfg.overlay.bg_color[3] = int(value / 100 * 255)
+        self._cfg.overlay.bg_color[3] = round(value / 100 * 255)
         self._refresh_swatch(self._bg_btn, self._cfg.overlay.bg_color)
         self._overlay.apply_appearance(self._cfg.overlay)
 
