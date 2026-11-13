@@ -1,4 +1,6 @@
-# VNTL — Visual Novel Translator
+# VNTL — 日译中本地改造版
+
+本目录已改为简体中文翻译，并增加 ePSXe / PS1 的按需识屏翻译。请先阅读 [使用说明](使用说明.md)。下方保留上游原项目说明，英文翻译及原版操作描述不适用于本地改造部分。
 
 Real-time Japanese → English translator for Windows visual novels. Hooks into the game's text rendering, extracts Japanese lines as they appear, and displays AI translations in a frameless always-on-top overlay.
 
