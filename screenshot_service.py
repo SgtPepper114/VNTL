@@ -162,6 +162,15 @@ class ScreenshotService:
             return True
         return bool(_user32.SetWindowDisplayAffinity(hwnd, 0x11))
 
+    @staticmethod
+    def exclusion_error_text() -> str:
+        if sys.platform != "win32":
+            return "持续观察的窗口截图需要 Windows。"
+        if sys.getwindowsversion().build < 19041:
+            return "当前 Windows 版本需要更新到 Windows 10 2004 或更高版本以支持持续截图。"
+        return (f"浮窗无法从截图中排除（Windows 错误 {ctypes.get_last_error()}）。"
+                "请重启更新后的 VNTL；也可暂停观察后使用按键识屏。")
+
     def capture_frame(self):
         """Quiet continuous capture, paused while another application has focus.
 

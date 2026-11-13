@@ -98,7 +98,7 @@ async def capture_observation(screenshots: ScreenshotService):
         raise RuntimeError("设置窗口打开时观察暂停，关闭后自动继续。")
     for window in QApplication.topLevelWidgets():
         if window.isVisible() and not screenshots.exclude_window(int(window.winId())):
-            raise RuntimeError("持续观察需要 Windows 10 2004 或更新版本的窗口截图支持。")
+            raise RuntimeError(screenshots.exclusion_error_text())
     return await asyncio.to_thread(screenshots.capture_frame)
 
 

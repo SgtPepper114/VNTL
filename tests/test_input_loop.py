@@ -139,6 +139,20 @@ class InputLoopTests(unittest.IsolatedAsyncioTestCase):
         window.hide.assert_not_called()
         window.show.assert_not_called()
 
+    async def test_capture_exclusion_failure_reports_actual_cause(self):
+        window = Mock()
+        window.isVisible.return_value = True
+        window.winId.return_value = 123
+        app = SimpleNamespace(activeModalWidget=lambda: None, topLevelWidgets=lambda: [window])
+        screenshots = Mock()
+        screenshots.exclude_window.return_value = False
+        screenshots.exclusion_error_text.return_value = "浮窗无法从截图中排除（Windows 错误 8）"
+        with patch.object(main, "QApplication", app):
+            with self.assertRaisesRegex(RuntimeError, "Windows 错误 8"):
+                await main.capture_observation(screenshots)
+        screenshots.capture_frame.assert_not_called()
+        window.hide.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

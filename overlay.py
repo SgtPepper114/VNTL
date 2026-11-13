@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 
 from PyQt6.QtCore import Qt, QPoint, QSize, QTimer, QEvent
 from PyQt6.QtGui import QColor, QFont, QPainter
@@ -17,6 +18,8 @@ from hooker import HookerService, StreamState
 from screenshot_service import ScreenshotService
 from ruby_label import RubyLabel
 from process_catalog import ProcessEntry, list_process_entries
+
+_NATIVE_WINDOW_OPACITY = sys.platform == "win32"
 
 
 class _ResizeGrip(QWidget):
@@ -428,7 +431,16 @@ class OverlayWindow(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Window
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._native_window_opacity = _NATIVE_WINDOW_OPACITY
+        if self._native_window_opacity:
+            # Qt's per-pixel layered surface rejects capture exclusion on some
+            # Windows systems. An opaque backing with native window alpha keeps
+            # WDA_EXCLUDEFROMCAPTURE working without hide/show capture flicker.
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+            self.setWindowOpacity(self._cfg.overlay.bg_color[3] / 255)
+        else:
+            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMinimumSize(480, 150)
 
@@ -852,6 +864,8 @@ class OverlayWindow(QWidget):
             f"font-family: '{ov.en_font_family}'; "
             f"font-size: {ov.en_font_size}pt;"
         )
+        if self._native_window_opacity:
+            self.setWindowOpacity(ov.bg_color[3] / 255)
         self.update()  # repaint background
         if self._backlog_win is not None:
             self._backlog_win.refresh_appearance(ov)
@@ -989,6 +1003,12 @@ class OverlayWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         r, g, b, a = self._cfg.overlay.bg_color
+        if self._native_window_opacity:
+            # Fill even the rounded corners so the native backing is opaque.
+            # Alpha stays in the user's configuration; it is applied once by
+            # the window compositor, including the text and controls.
+            painter.fillRect(self.rect(), QColor(r, g, b, 255))
+            a = 255
         painter.setBrush(QColor(r, g, b, a))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRoundedRect(self.rect(), 8, 8)
