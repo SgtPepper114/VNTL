@@ -29,9 +29,11 @@ class ObservationConfigTests(unittest.TestCase):
                    context_summarize_tokens=12000)
         cfg = load_config()
         self.assertTrue(cfg.observation_enabled)
+        self.assertTrue(cfg.auto_game_viewport)
         self.assertEqual(cfg.translation_mode, "manual")
         self.assertEqual((cfg.ocr_stable_ms, cfg.ocr_poll_ms, cfg.ocr_region_top_percent),
                          (600, 200, 0))
+        self.assertEqual(cfg.ocr_region_bottom_percent, 100)
         self.assertTrue(cfg.scene_observation_enabled)
         self.assertEqual(cfg.scene_observation_interval, 10.0)
         self.assertTrue(cfg.screenshot_enabled)
@@ -39,8 +41,9 @@ class ObservationConfigTests(unittest.TestCase):
         self.assertEqual(cfg.game_title, "原游戏")
 
     def test_round_trip_preserves_independent_scene_and_legacy_switches(self):
-        cfg = Config(observation_enabled=False, translation_mode="auto",
+        cfg = Config(observation_enabled=False, auto_game_viewport=False, translation_mode="auto",
                      ocr_stable_ms=850, ocr_poll_ms=350, ocr_region_top_percent=60,
+                     ocr_region_bottom_percent=95,
                      scene_observation_enabled=False, scene_observation_interval=12.5,
                      screenshot_enabled=True, controller_button="GL")
         save_config(cfg)
@@ -50,7 +53,7 @@ class ObservationConfigTests(unittest.TestCase):
         for invalid in (None, True, False, "bad", [], {}, float("nan"), float("inf")):
             with self.subTest(value=invalid):
                 self.write(ocr_stable_ms=invalid, ocr_poll_ms=invalid,
-                           ocr_region_top_percent=invalid,
+                           ocr_region_top_percent=invalid, ocr_region_bottom_percent=invalid,
                            scene_observation_interval=invalid,
                            translation_mode=invalid, game_title="应保留")
                 cfg = load_config()
@@ -58,11 +61,14 @@ class ObservationConfigTests(unittest.TestCase):
                                   cfg.ocr_region_top_percent, cfg.scene_observation_interval),
                                  (600, 200, 0, 10.0))
                 self.assertEqual(cfg.translation_mode, "manual")
+                self.assertEqual(cfg.ocr_region_bottom_percent, 100)
                 self.assertEqual(cfg.game_title, "应保留")
         for invalid in ("false", "true", 0, 1, None, [], {}):
             with self.subTest(boolean=invalid):
-                self.write(observation_enabled=invalid, scene_observation_enabled=invalid)
+                self.write(observation_enabled=invalid, auto_game_viewport=invalid,
+                           scene_observation_enabled=invalid)
                 self.assertTrue(load_config().observation_enabled)
+                self.assertTrue(load_config().auto_game_viewport)
                 self.assertTrue(load_config().scene_observation_enabled)
 
     def test_numeric_limits_clamp_each_field_independently(self):
@@ -77,6 +83,34 @@ class ObservationConfigTests(unittest.TestCase):
                                   cfg.ocr_region_top_percent, cfg.scene_observation_interval),
                                  expected)
                 self.assertEqual(cfg.controller_button, "GL")
+
+    def test_bottom_boundary_is_bounded_and_invalid_region_uses_window_bottom(self):
+        for top, bottom, expected in (
+            (0, -1, 10), (0, 101, 100), (60, 95, 95), (60, "95", 95),
+            (60, 60, 100), (60, 20, 100), (90, 90, 100), (90, 91, 91),
+        ):
+            with self.subTest(top=top, bottom=bottom):
+                self.write(ocr_region_top_percent=top, ocr_region_bottom_percent=bottom,
+                           game_title="边界测试")
+                cfg = load_config()
+                self.assertEqual(cfg.ocr_region_top_percent, top)
+                self.assertEqual(cfg.ocr_region_bottom_percent, expected)
+                self.assertGreater(cfg.ocr_region_bottom_percent, cfg.ocr_region_top_percent)
+                self.assertEqual(cfg.game_title, "边界测试")
+
+    def test_existing_top_only_setting_keeps_full_lower_extent(self):
+        self.write(ocr_region_top_percent=60)
+        cfg = load_config()
+        self.assertEqual((cfg.ocr_region_top_percent, cfg.ocr_region_bottom_percent), (60, 100))
+        self.assertTrue(cfg.auto_game_viewport)
+
+    def test_viewport_setting_round_trip_preserves_both_boolean_states(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                save_config(Config(auto_game_viewport=enabled, game_title="配置测试"))
+                restored = load_config()
+                self.assertIs(restored.auto_game_viewport, enabled)
+                self.assertEqual(restored.game_title, "配置测试")
 
 
 class ObservationSettingsTests(unittest.TestCase):
@@ -110,7 +144,9 @@ class ObservationSettingsTests(unittest.TestCase):
             self.dialog._translation_mode_combo.findData("auto"))
         self.dialog._ocr_stable_spin.setValue(800)
         self.dialog._ocr_poll_spin.setValue(300)
+        self.dialog._auto_game_viewport_check.setChecked(False)
         self.dialog._ocr_region_top_spin.setValue(60)
+        self.dialog._ocr_region_bottom_spin.setValue(95)
         self.dialog._scene_observation_interval_spin.setValue(15.5)
         self.dialog._scene_observation_check.setChecked(False)
         self.dialog._observation_enabled_check.setChecked(False)
@@ -120,6 +156,7 @@ class ObservationSettingsTests(unittest.TestCase):
         tabs = self.dialog.findChild(QTabWidget)
         self.assertEqual(tabs.tabText(0), "游戏")
         self.assertEqual(tabs.tabText(1), "识屏")
+        self.assertTrue(tabs.widget(1).isAncestorOf(self.dialog._auto_game_viewport_check))
         before = copy.deepcopy(self.cfg)
         self.edit()
         self.assertEqual(self.cfg, before)
@@ -127,9 +164,11 @@ class ObservationSettingsTests(unittest.TestCase):
         self.dialog._on_save()
         cfg = load_config()
         self.assertFalse(cfg.observation_enabled)
+        self.assertFalse(cfg.auto_game_viewport)
         self.assertEqual(cfg.translation_mode, "auto")
         self.assertEqual((cfg.ocr_stable_ms, cfg.ocr_poll_ms, cfg.ocr_region_top_percent),
                          (800, 300, 60))
+        self.assertEqual(cfg.ocr_region_bottom_percent, 95)
         self.assertFalse(cfg.scene_observation_enabled)
         self.assertEqual(cfg.scene_observation_interval, 15.5)
         self.saved.assert_called_once_with(self.cfg)
@@ -153,9 +192,13 @@ class ObservationSettingsTests(unittest.TestCase):
         self.assertFalse(interval.isEnabled())
         self.assertFalse(self.dialog._scene_thresh_slider.isEnabled())
         self.dialog._observation_enabled_check.setChecked(False)
+        self.assertFalse(self.dialog._auto_game_viewport_check.isEnabled())
+        self.assertFalse(self.dialog._ocr_region_bottom_spin.isEnabled())
         self.dialog._scene_observation_check.setChecked(True)
         self.assertFalse(interval.isEnabled())
         self.dialog._observation_enabled_check.setChecked(True)
+        self.assertTrue(self.dialog._auto_game_viewport_check.isEnabled())
+        self.assertTrue(self.dialog._ocr_region_bottom_spin.isEnabled())
         self.assertTrue(interval.isEnabled())
         self.assertTrue(self.dialog._scene_thresh_slider.isEnabled())
 
@@ -174,6 +217,39 @@ class ObservationSettingsTests(unittest.TestCase):
         restored = load_config()
         self.assertAlmostEqual(restored.scene_change_threshold, _slider_to_threshold(65))
         self.assertEqual(restored.scene_change_cooldown, 3.5)
+
+    def test_region_controls_keep_a_positive_height_when_either_boundary_changes(self):
+        top = self.dialog._ocr_region_top_spin
+        bottom = self.dialog._ocr_region_bottom_spin
+        self.assertEqual((top.value(), bottom.value()), (0, 100))
+        top.setValue(80)
+        bottom.setValue(20)
+        self.assertEqual((top.value(), bottom.value()), (19, 20))
+        top.setValue(90)
+        self.assertEqual((top.value(), bottom.value()), (90, 91))
+        bottom.setValue(10)
+        self.assertEqual((top.value(), bottom.value()), (9, 10))
+        self.assertEqual((self.cfg.ocr_region_top_percent, self.cfg.ocr_region_bottom_percent),
+                         (0, 100))
+        self.dialog._on_save()
+        cfg = load_config()
+        self.assertEqual((cfg.ocr_region_top_percent, cfg.ocr_region_bottom_percent), (9, 10))
+
+    def test_viewport_toggle_keeps_manual_region_and_saved_choice_on_reopen(self):
+        from settings import SettingsDialog
+        self.assertTrue(self.dialog._auto_game_viewport_check.isChecked())
+        self.dialog._ocr_region_top_spin.setValue(20)
+        self.dialog._ocr_region_bottom_spin.setValue(85)
+        self.dialog._auto_game_viewport_check.setChecked(False)
+        self.assertTrue(self.cfg.auto_game_viewport)
+        self.assertEqual((self.dialog._ocr_region_top_spin.value(),
+                          self.dialog._ocr_region_bottom_spin.value()), (20, 85))
+        self.dialog._on_save()
+        reopened = SettingsDialog(load_config(), self.overlay, self.saved)
+        self.addCleanup(reopened.close)
+        self.assertFalse(reopened._auto_game_viewport_check.isChecked())
+        self.assertEqual((reopened._ocr_region_top_spin.value(),
+                          reopened._ocr_region_bottom_spin.value()), (20, 85))
 
 
 class ObservationOverlayTests(unittest.TestCase):

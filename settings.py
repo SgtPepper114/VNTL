@@ -515,7 +515,9 @@ class SettingsDialog(QDialog):
 
         # Opacity slider
         row = QHBoxLayout()
-        lbl = QLabel("背景不透明度：")
+        lbl = QLabel("浮窗整体不透明度：" if os.name == "nt" else "背景不透明度：")
+        if os.name == "nt":
+            lbl.setToolTip("Windows 下会同时调整背景、文字和按钮的透明度。")
         lbl.setFixedWidth(165)
         row.addWidget(lbl)
 
@@ -641,17 +643,33 @@ class SettingsDialog(QDialog):
         add_spin("画面检查间隔：", "_ocr_poll_spin", 100, 1000,
                  self._cfg.ocr_poll_ms, " 毫秒", 100)
         timing_note = QLabel(
-            "等待逐字显示的字幕稳定后再识别。稳定等待越短，出译文越快，"
-            "也越容易读到半句；检查间隔越短，本机处理次数越多。"
+            "主体文字或逐行文字框保持稳定的等待时间；允许少量 OCR 抖动，"
+            "最长 4 秒后提交当前候选。检查间隔越短，本机处理次数越多。"
         )
         timing_note.setWordWrap(True)
         timing_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
         parent.addWidget(timing_note)
-        add_spin("字幕区域起点（窗口高度）：", "_ocr_region_top_spin", 0, 90,
+        self._auto_game_viewport_check = QCheckBox("自动识别游戏画面")
+        self._auto_game_viewport_check.setChecked(self._cfg.auto_game_viewport)
+        parent.addWidget(self._auto_game_viewport_check)
+        viewport_note = QLabel(
+            "首次选定窗口和窗口尺寸变化时使用截图模型标定游戏画面，后续本地裁切。"
+            "字幕上下边界相对于识别后的游戏画面，0%–100% 默认覆盖全画面。"
+            "标定失败时使用完整窗口并显示提示。"
+        )
+        viewport_note.setWordWrap(True)
+        viewport_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(viewport_note)
+        add_spin("字幕区域起点（游戏画面高度）：", "_ocr_region_top_spin", 0, 90,
                  self._cfg.ocr_region_top_percent, "%", 5)
+        add_spin("字幕区域下边界（游戏画面高度）：", "_ocr_region_bottom_spin", 10, 100,
+                 self._cfg.ocr_region_bottom_percent, "%", 5)
+        self._ocr_region_top_spin.valueChanged.connect(self._on_ocr_region_top_changed)
+        self._ocr_region_bottom_spin.valueChanged.connect(self._on_ocr_region_bottom_changed)
+        self._on_ocr_region_top_changed(self._ocr_region_top_spin.value())
         region_note = QLabel(
-            "0% 表示整个游戏窗口；60% 表示只读底部 40%。"
-            "《黄昏症候群》的底部对白可尝试 60%；如果菜单或文字在上方，请改回 0%。"
+            "上下边界用于手动补充裁切，可按字幕实际位置缩小识字区域。"
+            "关闭自动识别时，以完整窗口作为边界参照。"
             "场景观察仍使用完整游戏画面。"
         )
         region_note.setWordWrap(True)
@@ -703,10 +721,20 @@ class SettingsDialog(QDialog):
         self._scene_observation_check.toggled.connect(self._refresh_observation_controls)
         self._refresh_observation_controls()
 
+    def _on_ocr_region_top_changed(self, value: int) -> None:
+        if self._ocr_region_bottom_spin.value() <= value:
+            self._ocr_region_bottom_spin.setValue(value + 1)
+
+    def _on_ocr_region_bottom_changed(self, value: int) -> None:
+        if self._ocr_region_top_spin.value() >= value:
+            self._ocr_region_top_spin.setValue(value - 1)
+
     def _refresh_observation_controls(self) -> None:
         enabled = self._observation_enabled_check.isChecked()
         for control in (self._ocr_stable_spin, self._ocr_poll_spin,
-                        self._ocr_region_top_spin, self._scene_observation_check):
+                        self._auto_game_viewport_check,
+                        self._ocr_region_top_spin, self._ocr_region_bottom_spin,
+                        self._scene_observation_check):
             control.setEnabled(enabled)
         scene_enabled = enabled and self._scene_observation_check.isChecked()
         for control in (self._scene_thresh_slider, self._scene_thresh_lbl,
@@ -1138,10 +1166,12 @@ class SettingsDialog(QDialog):
         self._cfg.game_notes = normalize_game_text(self._game_notes_edit.toPlainText(), GAME_NOTES_MAX_LENGTH)
 
         self._cfg.observation_enabled = self._observation_enabled_check.isChecked()
+        self._cfg.auto_game_viewport = self._auto_game_viewport_check.isChecked()
         self._cfg.translation_mode = self._translation_mode_combo.currentData()
         self._cfg.ocr_stable_ms = self._ocr_stable_spin.value()
         self._cfg.ocr_poll_ms = self._ocr_poll_spin.value()
         self._cfg.ocr_region_top_percent = self._ocr_region_top_spin.value()
+        self._cfg.ocr_region_bottom_percent = self._ocr_region_bottom_spin.value()
         self._cfg.scene_observation_enabled = self._scene_observation_check.isChecked()
         self._cfg.scene_observation_interval = self._scene_observation_interval_spin.value()
 

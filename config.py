@@ -122,10 +122,12 @@ class Config:
     clipboard_enabled:  bool = False
     # Continuous observation starts only after a game window is selected.
     observation_enabled: bool = True
+    auto_game_viewport: bool = True
     translation_mode: str = "manual"  # manual | auto; observation runs in both.
     ocr_stable_ms: int = 600
     ocr_poll_ms: int = 200
     ocr_region_top_percent: int = 0
+    ocr_region_bottom_percent: int = 100
     scene_observation_enabled: bool = True
     scene_observation_interval: float = 10.0
     game_title: str = ""
@@ -204,7 +206,7 @@ def load_config() -> Config:
 
         cfg.screenshot_enabled        = data.get("screenshot_enabled", False)
         cfg.clipboard_enabled         = data.get("clipboard_enabled", False)
-        for name in ("observation_enabled", "scene_observation_enabled"):
+        for name in ("observation_enabled", "auto_game_viewport", "scene_observation_enabled"):
             value = data.get(name, getattr(cfg, name))
             if isinstance(value, bool):
                 setattr(cfg, name, value)
@@ -215,10 +217,13 @@ def load_config() -> Config:
             ("ocr_stable_ms", 200, 2000),
             ("ocr_poll_ms", 100, 1000),
             ("ocr_region_top_percent", 0, 90),
+            ("ocr_region_bottom_percent", 10, 100),
             ("scene_observation_interval", 3.0, 120.0),
         ):
             default = getattr(cfg, name)
             setattr(cfg, name, _bounded_number(data.get(name, default), default, minimum, maximum))
+        if cfg.ocr_region_bottom_percent <= cfg.ocr_region_top_percent:
+            cfg.ocr_region_bottom_percent = 100
         controller_enabled = data.get("controller_enabled", True)
         cfg.controller_enabled = controller_enabled if isinstance(controller_enabled, bool) else True
         controller_button = data.get("controller_button", "GR")
