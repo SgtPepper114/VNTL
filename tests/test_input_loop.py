@@ -96,6 +96,49 @@ class InputLoopTests(unittest.IsolatedAsyncioTestCase):
         main.clear_requests(requests)
         self.assertTrue(requests.empty())
 
+    async def test_clear_during_screen_read_discards_old_route_before_translation(self):
+        context = ContextManager()
+        cfg = Config(deepseek_api_key="test-placeholder")
+        finished = asyncio.Event()
+        overlay = Mock()
+        overlay.set_busy.side_effect = lambda busy: finished.set() if not busy else None
+        async def read_screen(image):
+            context.clear()
+            context.add_line("NEW_ROUTE_JP", "新路线")
+            return "OLD_ROUTE_JP", "旧场景"
+        translator = Mock()
+        translator.read_screen = AsyncMock(side_effect=read_screen)
+        translator.translate = AsyncMock(return_value="旧路线")
+        requests = asyncio.Queue(maxsize=1)
+        main.enqueue(requests, "screen")
+        fake_app = SimpleNamespace(clipboard=lambda: SimpleNamespace(text=lambda: ""))
+        with patch.object(main, "QApplication", fake_app), \
+             patch.object(main, "capture_game", AsyncMock(return_value="image")):
+            task = asyncio.create_task(main.input_loop(
+                translator, overlay, SimpleNamespace(is_attached=False), Mock(), cfg, context, requests, Mock()))
+            await asyncio.wait_for(finished.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        translator.translate.assert_not_awaited()
+        overlay.update_text.assert_not_called()
+        self.assertEqual([line.jp for line in context.history], ["NEW_ROUTE_JP"])
+        self.assertIsNone(context.current_scene_description)
+
+    async def test_continuous_capture_keeps_own_windows_visible(self):
+        window = Mock()
+        window.isVisible.return_value = True
+        window.winId.return_value = 123
+        app = SimpleNamespace(activeModalWidget=lambda: None, topLevelWidgets=lambda: [window])
+        screenshots = Mock()
+        screenshots.exclude_window.return_value = True
+        screenshots.capture_frame.return_value = "frame"
+        with patch.object(main, "QApplication", app):
+            self.assertEqual(await main.capture_observation(screenshots), "frame")
+        screenshots.exclude_window.assert_called_once_with(123)
+        window.hide.assert_not_called()
+        window.show.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

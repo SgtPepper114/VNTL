@@ -37,6 +37,23 @@ class ScreenshotServiceTests(unittest.TestCase):
         # No monitors member: a successful test cannot depend on a desktop fallback.
         self.mss_factory.return_value.__enter__.return_value = SimpleNamespace(grab=self.grab)
 
+    @unittest.skipUnless(module.sys.platform == "win32", "Windows foreground check")
+    def test_continuous_capture_pauses_when_our_overlay_covers_another_app(self):
+        native = MagicMock()
+        native.GetWindowThreadProcessId.side_effect = lambda hwnd, owner: setattr(owner._obj, "value", module.os.getpid())
+        with patch.object(module, "_user32", native):
+            with self.assertRaisesRegex(RuntimeError, "切换到前台"):
+                self.service.capture_frame()
+        self.mss_factory.assert_not_called()
+
+    @unittest.skipUnless(module.sys.platform == "win32", "Windows foreground check")
+    def test_continuous_capture_reads_only_when_game_has_focus(self):
+        self.fake_frame()
+        native = MagicMock()
+        native.GetWindowThreadProcessId.side_effect = lambda hwnd, owner: setattr(owner._obj, "value", 123)
+        with patch.object(module, "_user32", native):
+            self.assertEqual(self.service.capture_frame().size, (320, 240))
+
     def decode_image(self, encoded):
         return Image.open(io.BytesIO(base64.b64decode(encoded)))
 

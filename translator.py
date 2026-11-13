@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import datetime
 import json
 import logging
@@ -47,8 +48,9 @@ _SYSTEM_PROMPT = """\
 """
 
 _SUMMARIZE_SYSTEM = """\
-你为日语文字冒险游戏的日译中翻译维护中文剧情记忆。输入包含旧摘要与新的 JP→ZH 对话，
-可能带有 [Scene:] 视觉描述。请用简体中文整理一份可继续使用的摘要。
+你为日语文字冒险游戏的日译中翻译维护中文剧情记忆。输入包含旧摘要、已经观察到的日语原文，
+以及可选的中文译文和 [Scene:] 视觉描述。原文可能尚未翻译，也可能只有场景观察，
+都应按已有证据纳入记忆。请用简体中文整理一份可继续使用的摘要。
 
 只记录玩家已经读到的内容。不得引用游戏攻略、结局或其他外部剧情知识；未知之处保持未知。
 旧摘要与机器译文可能有误，日语原文和新出现的明确证据优先。纠正被新证据否定的旧理解，
@@ -371,7 +373,10 @@ class Translator:
             for line in recent_lines:
                 if line.scene_description:
                     history.append(f"[此前场景] {line.scene_description}")
-                history.append(f"[JP] {line.jp}\n[ZH] {line.en}")
+                if line.jp.strip():
+                    history.append(f"[JP] {line.jp}")
+                    if line.en.strip():
+                        history.append(f"[ZH] {line.en}")
             context_parts.append("[最近已读对话，不能当作当前截图原文]\n" + "\n".join(history))
         context_parts.append("请只读取这张截图中实际可见的日语，并返回规定的 JSON。")
         messages = [{
@@ -420,22 +425,54 @@ class Translator:
             raise ValueError("截图识别的 japanese 和 scene 字段必须是文本，请重试。")
         return data["japanese"].strip(), data["scene"].strip()
 
+    async def translate_observation(self, observation_id: str, revision: int) -> str:
+        """Translate one frozen observation request without writing to memory.
+
+        The coordinator checks its session epoch and source revision before
+        committing or displaying this result. Retries retain the same profile,
+        context and model parameters as this request, even if settings change.
+        """
+        target = self._context.get_observation(observation_id, revision)
+        if target is None:
+            raise ValueError("Observation no longer exists or has changed")
+        if not target.jp.strip():
+            return ""
+        messages = copy.deepcopy(self._with_request_preferences(
+            self._context.get_observation_messages(observation_id, revision), translation=True))
+        system = self._with_game_context(self._cfg.translator_system_prompt or _SYSTEM_PROMPT)
+        provider, model = self._cfg.translator_provider, self._cfg.translator_model
+        options = {
+            "max_tokens": self._cfg.translator_max_tokens,
+            "use_cache": provider == "anthropic",
+            "think": self._cfg.translator_ollama_thinking,
+            "reasoning_effort": self._cfg.translator_google_thinking_level,
+        }
+        for _ in range(2):
+            result = await self._call(provider, model, system, copy.deepcopy(messages), **options)
+            self._log_call("TRANSLATE", provider, model, system, messages, result)
+            if result and result.strip():
+                return result
+        return ""
+
     async def translate(self, jp_text: str, *, replace_last: bool = False) -> str:
         """Translate a Japanese line and update the context.
 
         The caller may schedule summarization in the background. Translation does
         not wait for it; the summary commits only its captured history prefix.
         """
+        epoch = self._context.epoch
+        pending_scene = self._context.current_scene_description
         base_messages = self._context.get_messages(jp_text)
         replacing = (replace_last and self._context.history
                      and self._context.history[-1].jp == jp_text)
         if replacing:
             old_line = self._context.history[-1]
-            # Omit the old translation from the request but keep committed memory
-            # intact while waiting: shutdown or cancellation must not lose it.
-            del base_messages[-3:-1]
-            if old_line.scene_description and not self._context.current_scene_description:
-                base_messages[-1]["content"] = f"[Scene: {old_line.scene_description}]\n" + base_messages[-1]["content"]
+            # Source-only observations have no assistant turn to slice away.
+            # Build by identity, retaining the original record during the await.
+            replacement = (old_line.observation_id, old_line.revision)
+            base_messages = self._context.get_observation_messages(*replacement)
+            if pending_scene:
+                base_messages[-1]["content"] = f"[Scene: {pending_scene}]\n[TRANSLATE THIS:]\n{jp_text}"
         provider = self._cfg.translator_provider
         model    = self._cfg.translator_model
         max_tok  = self._cfg.translator_max_tokens
@@ -450,7 +487,9 @@ class Translator:
         )
 
         self._log_call("TRANSLATE", provider, model, system, messages, result)
-        if not result:
+        if not result or not result.strip():
+            if self._context.epoch != epoch:
+                return ""
             logger.warning("Empty result for %r, retrying once…", jp_text)
             system = self._with_game_context(self._cfg.translator_system_prompt or _SYSTEM_PROMPT)
             messages = self._with_request_preferences(base_messages, translation=True)
@@ -461,10 +500,21 @@ class Translator:
             )
             self._log_call("TRANSLATE", provider, model, system, messages, result)
 
-        if result:
+        if self._context.epoch != epoch:
+            logger.info("Discarding legacy translation from an obsolete context.")
+            return ""
+        if result and result.strip():
             if replacing:
-                self._context.pop_last_line_if_matches(jp_text)
-            self._context.add_line(jp_text, result)
+                if not self._context.commit_translation(*replacement, result):
+                    return ""
+                if pending_scene:
+                    self._context.attach_scene(*replacement, pending_scene)
+            else:
+                line = self._context.observe(jp_text, pending_scene)
+                self._context.commit_translation(line.observation_id, line.revision, result)
+            # Never consume a newer screenshot's pending scene after awaiting.
+            if self._context.current_scene_description == pending_scene:
+                self._context.current_scene_description = None
         else:
             logger.warning("Translator returned empty result for %r after retry — skipping context write", jp_text)
         logger.debug("Translated: %r -> %r", jp_text, result)
@@ -489,7 +539,10 @@ class Translator:
                 if l.scene_description is not None:
                     last_scene_idx = len(hist_parts)
                     hist_parts.append(f"[Scene: {l.scene_description}]")
-                hist_parts.append(f"JP: {l.jp}\nZH: {l.en}")
+                if l.jp.strip():
+                    hist_parts.append(f"JP: {l.jp}")
+                    if l.en.strip():
+                        hist_parts.append(f"ZH: {l.en}")
             if last_scene_idx is not None:
                 # Rename the most-recent [Scene:] tag to [Previous scene:] so the
                 # model understands it describes the scene before the current screenshot.

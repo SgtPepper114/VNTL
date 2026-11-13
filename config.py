@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from dataclasses import dataclass, field, asdict
 
@@ -10,6 +11,20 @@ GAME_NOTES_MAX_LENGTH = 4000
 def normalize_game_text(value: object, max_length: int) -> str:
     """Keep user-provided game context as bounded plain text."""
     return value.strip()[:max_length].rstrip() if isinstance(value, str) else ""
+
+
+def _bounded_number(value: object, default: int | float, minimum, maximum):
+    """Reject malformed settings locally, without discarding the rest of the file."""
+    if isinstance(value, bool):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if not math.isfinite(number):
+        return default
+    number = max(minimum, min(maximum, number))
+    return int(number) if isinstance(default, int) else float(number)
 
 ROLE_PROVIDER_DEFAULTS: dict[str, dict[str, str]] = {
     "translator": {
@@ -105,6 +120,14 @@ class Config:
 
     screenshot_enabled: bool = False
     clipboard_enabled:  bool = False
+    # Continuous observation starts only after a game window is selected.
+    observation_enabled: bool = True
+    translation_mode: str = "manual"  # manual | auto; observation runs in both.
+    ocr_stable_ms: int = 600
+    ocr_poll_ms: int = 200
+    ocr_region_top_percent: int = 0
+    scene_observation_enabled: bool = True
+    scene_observation_interval: float = 10.0
     game_title: str = ""
     game_notes: str = ""
     controller_enabled: bool = True
@@ -181,6 +204,21 @@ def load_config() -> Config:
 
         cfg.screenshot_enabled        = data.get("screenshot_enabled", False)
         cfg.clipboard_enabled         = data.get("clipboard_enabled", False)
+        for name in ("observation_enabled", "scene_observation_enabled"):
+            value = data.get(name, getattr(cfg, name))
+            if isinstance(value, bool):
+                setattr(cfg, name, value)
+        mode = data.get("translation_mode", cfg.translation_mode)
+        if mode in ("manual", "auto"):
+            cfg.translation_mode = mode
+        for name, minimum, maximum in (
+            ("ocr_stable_ms", 200, 2000),
+            ("ocr_poll_ms", 100, 1000),
+            ("ocr_region_top_percent", 0, 90),
+            ("scene_observation_interval", 3.0, 120.0),
+        ):
+            default = getattr(cfg, name)
+            setattr(cfg, name, _bounded_number(data.get(name, default), default, minimum, maximum))
         controller_enabled = data.get("controller_enabled", True)
         cfg.controller_enabled = controller_enabled if isinstance(controller_enabled, bool) else True
         controller_button = data.get("controller_button", "GR")

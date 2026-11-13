@@ -8,6 +8,10 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+from runtime_bootstrap import preload_windows_runtime
+
+preload_windows_runtime()
+
 from PyQt6.QtCore import QLockFile
 from PyQt6.QtWidgets import QApplication, QMessageBox
 import qasync
@@ -16,15 +20,17 @@ from config import load_config, save_config
 from context_manager import ContextManager
 from translator import Translator
 from overlay import OverlayWindow
-from hooker import HookerService, list_processes
+from hooker import HookerService
 from hotkeys import GlobalHotkeys
 from controller import ControllerService
 from fonts import initialize_fonts
 from screenshot_service import ScreenshotService
 from summary_worker import BackgroundSummarizer
+from observation_service import ObservationService
 
 DATA_DIR = Path.home() / ".config" / "vntl"
-AUTOSAVE_PATH = DATA_DIR / "contexts" / "黄昏症候群_自动保存.json"
+AUTOSAVE_PATH = DATA_DIR / "contexts" / "自动保存.json"
+LEGACY_AUTOSAVE_PATH = DATA_DIR / "contexts" / "黄昏症候群_自动保存.json"
 logger = logging.getLogger("vntl")
 
 
@@ -86,6 +92,16 @@ async def capture_game(screenshots: ScreenshotService) -> str:
             window.show()
 
 
+async def capture_observation(screenshots: ScreenshotService):
+    """Keep Qt responsive and avoid hiding/showing windows in a capture loop."""
+    if QApplication.activeModalWidget() is not None:
+        raise RuntimeError("设置窗口打开时观察暂停，关闭后自动继续。")
+    for window in QApplication.topLevelWidgets():
+        if window.isVisible() and not screenshots.exclude_window(int(window.winId())):
+            raise RuntimeError("持续观察需要 Windows 10 2004 或更新版本的窗口截图支持。")
+    return await asyncio.to_thread(screenshots.capture_frame)
+
+
 def make_summary_worker(translator, overlay, cfg, context):
     def on_committed():
         save_context_file(context, AUTOSAVE_PATH)
@@ -98,18 +114,18 @@ def make_summary_worker(translator, overlay, cfg, context):
 
 
 async def input_loop(translator, overlay, hooker, screenshots, cfg, context, requests,
-                     summaries=None):
+                     summaries=None, observer=None):
     owns_worker = summaries is None
     summaries = summaries or make_summary_worker(translator, overlay, cfg, context)
     try:
         summaries.request()  # Loaded memory may already meet the token threshold.
-        await _process_inputs(translator, overlay, hooker, screenshots, cfg, context, requests, summaries)
+        await _process_inputs(translator, overlay, hooker, screenshots, cfg, context, requests, summaries, observer)
     finally:
         if owns_worker:
             await summaries.aclose()
 
 
-async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context, requests, summaries):
+async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context, requests, summaries, observer=None):
     clipboard = QApplication.clipboard()
     last_clipboard = clipboard.text().strip()
     while True:
@@ -141,15 +157,30 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             summaries.request(force=True)
             continue
 
+        if command == "screen" and observer is not None and cfg.observation_enabled:
+            observer.request_display()
+            continue
+
         overlay.set_busy(True)
+        operation_epoch = context.epoch
+        operation_target = getattr(screenshots, "generation", None)
+
+        def operation_current():
+            return (context.epoch == operation_epoch
+                    and getattr(screenshots, "generation", None) == operation_target)
+
         try:
             check_provider_key(cfg, "translator")
             if command == "screen":
                 check_provider_key(cfg, "descriptor")
                 image = await capture_game(screenshots)
+                if not operation_current():
+                    continue
                 overlay.show()
                 overlay.show_loading("正在识别日文与画面…")
                 text, scene = await translator.read_screen(image)
+                if not operation_current():
+                    continue
                 if not text.strip():
                     overlay.show_error_text("", "当前画面没有识别到台词。请等待文字显示完整后重试。")
                     continue
@@ -157,8 +188,13 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             elif cfg.screenshot_enabled and screenshots.is_attached and command != "retry":
                 check_provider_key(cfg, "descriptor")
                 image = await capture_game(screenshots)
+                if not operation_current():
+                    continue
                 overlay.show_loading("正在读取场景…")
-                context.current_scene_description = await translator.describe_scene(image, text)
+                scene = await translator.describe_scene(image, text)
+                if not operation_current():
+                    continue
+                context.current_scene_description = scene
 
             text = text.strip()
             if not text:
@@ -168,14 +204,20 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             replaced = old_line is not None
             overlay.show_loading()
             translated = await translator.translate(text, replace_last=replaced)
+            if not operation_current():
+                continue
             if not translated:
                 raise RuntimeError("模型没有返回译文，请重试。")
+            if observer is not None:
+                observer.external_display()
             overlay.update_text(text, translated, replace_last=replaced)
             overlay.update_context(context.summary, context.history)
             save_context_file(context, AUTOSAVE_PATH)
             overlay.show_retry_button(lambda t=text: enqueue(requests, "retry", t))
             summaries.request()
         except Exception as exc:
+            if not operation_current():
+                continue
             logger.warning("Translation operation failed: %s (HTTP %s)",
                            type(exc).__name__, getattr(exc, "status_code", None))
             overlay.show()
@@ -215,9 +257,10 @@ async def main() -> None:
         cfg.google_api_key = os.environ.get("GEMINI_API_KEY", "")
 
     context = ContextManager(cfg.context_summarize_tokens, cfg.context_min_recent_lines)
-    if AUTOSAVE_PATH.exists():
+    restore_path = AUTOSAVE_PATH if AUTOSAVE_PATH.exists() else LEGACY_AUTOSAVE_PATH
+    if restore_path.exists():
         try:
-            context.load_from_dict(json.loads(AUTOSAVE_PATH.read_text(encoding="utf-8")))
+            context.load_from_dict(json.loads(restore_path.read_text(encoding="utf-8")))
         except (ValueError, KeyError, TypeError, OSError):
             logger.warning("Could not load autosaved context; starting a new session.")
     translator = Translator(cfg, context)
@@ -228,16 +271,12 @@ async def main() -> None:
     screenshots = ScreenshotService()
     screenshots.threshold = cfg.scene_change_threshold
     screenshots.cooldown = cfg.scene_change_cooldown
-    emulators = [pid for pid, name in list_processes() if name.lower() == "epsxe.exe"]
-    if len(emulators) == 1:
-        screenshots.set_pid(emulators[0])
-
     def request_screen():
-        if app.activeModalWidget() is None and not overlay.is_busy:
+        if app.activeModalWidget() is None and (cfg.observation_enabled or not overlay.is_busy):
             enqueue(requests, "screen")
 
     def request_controller_screen():
-        if cfg.controller_enabled and app.activeModalWidget() is None and not overlay.is_busy:
+        if cfg.controller_enabled and app.activeModalWidget() is None:
             logger.info("Controller translation requested: %s", cfg.controller_button)
             request_screen()
 
@@ -248,12 +287,15 @@ async def main() -> None:
         context.update_thresholds(updated.context_summarize_tokens, updated.context_min_recent_lines)
         overlay.update_game_title()
         overlay.set_screenshot_enabled(updated.screenshot_enabled)
+        overlay.update_observation_controls()
         controller.configure(updated.controller_enabled, updated.controller_button)
+        observer.configure()
         summaries.request()
 
     def load_context(path):
         summaries.cancel()
         context.load_from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+        observer.reset()
         clear_requests(requests)
         save_context_file(context, AUTOSAVE_PATH)
         summaries.request()
@@ -261,6 +303,7 @@ async def main() -> None:
     def clear_context():
         summaries.cancel()
         context.clear()
+        observer.reset()
         clear_requests(requests)
         save_context_file(context, AUTOSAVE_PATH)
 
@@ -271,10 +314,36 @@ async def main() -> None:
         request_screen_fn=request_screen,
     )
     summaries = make_summary_worker(translator, overlay, cfg, context)
+
+    def memory_changed():
+        save_context_file(context, AUTOSAVE_PATH)
+        overlay.update_context(context.summary, context.history)
+        summaries.request()
+
+    def display_observation(jp, zh, replace):
+        overlay.show()
+        overlay.update_text(jp, zh, replace_last=replace)
+        overlay.show_retry_button(lambda t=jp: observer.request_display(retry=True)
+                                  if cfg.observation_enabled else enqueue(requests, "retry", t))
+
+    observer = ObservationService(
+        cfg, context, translator,
+        capture=lambda: capture_observation(screenshots),
+        target_key=lambda: screenshots.generation if screenshots.is_attached else None,
+        on_display=display_observation, on_memory=memory_changed,
+        on_status=overlay.set_observation_status,
+        can_display=lambda: app.activeModalWidget() is None and not overlay.is_busy,
+    )
+
+    def target_changed():
+        observer.reset()
+        clear_requests(requests)
+        summaries.cancel()
+        summaries.request()
+
+    screenshots.on_target_changed = target_changed
     overlay.update_context(context.summary, context.history)
     overlay.show()
-    if screenshots.is_attached:
-        overlay.show_error_text("", "已连接 ePSXe。让游戏画面保持可见，按 Ctrl+Alt+T 翻译。")
     hotkeys = GlobalHotkeys(app, request_screen, overlay.toggle_visible)
     controller = ControllerService(app, request_controller_screen,
                                    enabled=cfg.controller_enabled, button=cfg.controller_button)
@@ -283,6 +352,7 @@ async def main() -> None:
         overlay.show_error_text("", "快捷键被占用：" + "、".join(hotkeys.failed) + "。可使用浮窗按钮。")
 
     def on_exit():
+        observer.stop()
         summaries.stop()
         overlay.save_geometry_to_config()
         save_config(cfg)
@@ -295,12 +365,17 @@ async def main() -> None:
     app.aboutToQuit.connect(on_exit)
     logger.info("VNTL 日译中启动，模型 %s/%s", cfg.translator_provider, cfg.translator_model)
     try:
-        await input_loop(translator, overlay, hooker, screenshots, cfg, context, requests, summaries)
+        observer.start()
+        await input_loop(translator, overlay, hooker, screenshots, cfg, context, requests, summaries, observer)
     finally:
+        await observer.aclose()
         await summaries.aclose()
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--check-ocr"]:
+        from diagnostics import check_ocr
+        raise SystemExit(check_ocr(sys.argv[2:]))
     _setup_logging()
     app = QApplication(sys.argv)
     loop = qasync.QEventLoop(app)

@@ -49,6 +49,11 @@ if sys.platform == "win32":
     _user32.GetClientRect.restype = wt.BOOL
     _user32.ClientToScreen.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
     _user32.ClientToScreen.restype = wt.BOOL
+    _user32.GetForegroundWindow.restype = wt.HWND
+    _user32.SetWindowDisplayAffinity.argtypes = [wt.HWND, wt.DWORD]
+    _user32.SetWindowDisplayAffinity.restype = wt.BOOL
+    _user32.GetWindowDisplayAffinity.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+    _user32.GetWindowDisplayAffinity.restype = wt.BOOL
 
     def _find_game_window(pid: int) -> Optional[int]:
         """Return the HWND of the largest visible top-level window owned by pid."""
@@ -121,6 +126,8 @@ class ScreenshotService:
         self._last_trigger_time: float = 0.0
         self.last_pct: float = 0.0
         self.last_triggered: bool = False
+        self.generation = 0
+        self.on_target_changed = None
 
     @property
     def is_attached(self) -> bool:
@@ -129,12 +136,59 @@ class ScreenshotService:
     def set_pid(self, pid: Optional[int]) -> None:
         if pid is not None and (not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0):
             raise ValueError("游戏进程 ID 必须是正整数。")
-        if pid != self._pid:
+        changed = pid != self._pid
+        if changed:
+            self.generation += 1
             self._last_thumb = None
             self._last_trigger_time = 0.0
             self.last_pct = 0.0
             self.last_triggered = False
         self._pid = pid
+        if changed and self.on_target_changed is not None:
+            self.on_target_changed()
+
+    @staticmethod
+    def exclude_window(hwnd: int) -> bool:
+        """Keep an owned VNTL window visible but out of desktop captures.
+
+        Windows 10 2004+ supplies the pixels behind an excluded window. Older
+        versions only produce black rectangles, so continuous capture refuses
+        that path. Call on the Qt thread for each visible top-level window.
+        """
+        if sys.platform != "win32" or sys.getwindowsversion().build < 19041:
+            return False
+        current = wt.DWORD()
+        if _user32.GetWindowDisplayAffinity(hwnd, ctypes.byref(current)) and current.value == 0x11:
+            return True
+        return bool(_user32.SetWindowDisplayAffinity(hwnd, 0x11))
+
+    def capture_frame(self):
+        """Quiet continuous capture, paused while another application has focus.
+
+        Uses the selected visible client area. Our windows must first be marked
+        excluded on the GUI thread; this method never hides or moves a window.
+        """
+        if sys.platform == "win32":
+            foreground = _user32.GetForegroundWindow()
+            owner = wt.DWORD()
+            _user32.GetWindowThreadProcessId(foreground, ctypes.byref(owner))
+            # Our floating window may itself sit over another application. Only
+            # a foreground game authorizes reading these screen pixels; owning
+            # the foreground overlay does not prove the game is unobscured.
+            if owner.value != self._pid:
+                raise RuntimeError("观察已暂停：请将游戏切换到前台。")
+        return self._capture_bound_image()
+
+    @staticmethod
+    def encode_frame(img) -> str:
+        """Encode a frozen frame for visual context and uncertain OCR fallback."""
+        img = img.copy()
+        img.thumbnail(_TEXT_MAX_SIZE, Image.Resampling.LANCZOS)
+        if img.width < 640 and img.height < 480:
+            img = img.resize((img.width * 2, img.height * 2), Image.Resampling.NEAREST)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=95, subsampling=0)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
 
     def _capture_bound_image(self):
         """Read only the selected game's visible client area, never the desktop.

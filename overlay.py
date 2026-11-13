@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QDialog, QDialogButtonBox,
     QFileDialog, QFrame, QHeaderView, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QMessageBox, QPushButton, QRadioButton, QTextEdit,
-    QScrollArea, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from config import Config, OverlayConfig
@@ -235,9 +235,8 @@ class ContextViewerWindow(QWidget):
         self._summary_edit = QTextEdit()
         self._summary_edit.setReadOnly(True)
         self._summary_edit.setPlaceholderText(
-            "No summary yet.\n\n"
-            "Context will be summarized automatically when it grows large enough, "
-            "or you can trigger it manually via right-click → Compact context."
+            "还没有剧情摘要。\n\n"
+            "近期记录达到阈值后会自动在后台整理，也可以右键选择“整理剧情摘要”。"
         )
         self._tabs.addTab(self._summary_edit, "剧情摘要")
 
@@ -255,7 +254,7 @@ class ContextViewerWindow(QWidget):
         self._history_inner.addStretch()
         self._history_scroll.setWidget(self._history_container)
         history_layout.addWidget(self._history_scroll)
-        self._tabs.addTab(history_widget, "近期对话")
+        self._tabs.addTab(history_widget, "近期记录")
 
         self._apply_style()
 
@@ -343,7 +342,8 @@ class ContextViewerWindow(QWidget):
             )
             scene_lbl: QLabel | None = None
             if line.scene_description:
-                scene_lbl = QLabel(f"[Scene: {line.scene_description}]", self._history_container)
+                scene_lbl = QLabel(f"场景观察：{line.scene_description}", self._history_container)
+                scene_lbl.setTextFormat(Qt.TextFormat.PlainText)
                 scene_lbl.setWordWrap(True)
                 scene_lbl.setTextInteractionFlags(_selectable)
                 self._history_inner.insertWidget(self._history_inner.count() - 1, scene_lbl)
@@ -352,7 +352,11 @@ class ContextViewerWindow(QWidget):
                                furigana_enabled=self._ov_cfg.jp_furigana_enabled)
             jp_lbl.setWordWrap(True)
             jp_lbl.setTextInteractionFlags(_selectable)
-            en_lbl = QLabel(line.en, self._history_container)
+            if not line.jp:
+                jp_lbl.hide()
+            translation = line.en or ("原文待译" if line.jp else "场景观察（无台词）")
+            en_lbl = QLabel(translation, self._history_container)
+            en_lbl.setTextFormat(Qt.TextFormat.PlainText)
             en_lbl.setWordWrap(True)
             en_lbl.setTextInteractionFlags(_selectable)
             self._history_inner.insertWidget(self._history_inner.count() - 1, jp_lbl)
@@ -403,6 +407,7 @@ class OverlayWindow(QWidget):
         self._context_viewer: ContextViewerWindow | None = None
         self._retry_fn = None
         self.is_busy = False
+        self._observation_status_text = "等待选择游戏窗口"
         self.controller_status_fn = lambda: "手柄监听尚未启动"
 
         self._setup_window()
@@ -465,7 +470,7 @@ class OverlayWindow(QWidget):
         self._subtitle_layout.addWidget(self._jp_label)
 
         # English translation — larger, bright
-        self._en_label = QLabel("先选择游戏或模拟器窗口，再按 Ctrl+Alt+T 识屏翻译。\n首次使用请在设置中填写模型 API Key。")
+        self._en_label = QLabel("先选择游戏或模拟器窗口，后台会开始观察并预译。\n手动模式按 Ctrl+Alt+T 显示中文；模式可在顶栏或设置中切换。")
         r, g, b, a = self._cfg.overlay.en_color
         self._en_label.setStyleSheet(
             f"color: rgba({r},{g},{b},{a}); "
@@ -484,10 +489,12 @@ class OverlayWindow(QWidget):
         self._subtitle_scroll.viewport().installEventFilter(self)
         self._subtitle_layout_timer.start(0)
 
-        # Resize grip (bottom-right corner, inside layout)
+        # Background activity has its own footer and never replaces subtitles.
+        self._status_layout = QHBoxLayout()
+        self._status_layout.setSpacing(6)
+        layout.addLayout(self._status_layout)
         grip = _ResizeGrip(self)
         grip.setFixedSize(self._HANDLE_SIZE, self._HANDLE_SIZE)
-        layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight)
 
         # Gear button — absolutely positioned top-right, NOT in the layout
         self._gear_btn = QPushButton("⚙", self)
@@ -554,9 +561,17 @@ class OverlayWindow(QWidget):
         self._window_btn.setToolTip("选择 DuckStation、ePSXe 等游戏窗口；仅截图，不注入模拟器")
         self._window_btn.setStyleSheet(self._capture_btn.styleSheet())
         self._window_btn.clicked.connect(self._attach_screenshot)
+        self._translation_mode_btn = QPushButton(self)
+        self._translation_mode_btn.setGeometry(212, 4, 62, 24)
+        self._translation_mode_btn.setStyleSheet(self._capture_btn.styleSheet())
+        self._translation_mode_btn.clicked.connect(self._toggle_translation_mode)
+        self._observation_btn = QPushButton(self)
+        self._observation_btn.setGeometry(280, 4, 66, 24)
+        self._observation_btn.setStyleSheet(self._capture_btn.styleSheet())
+        self._observation_btn.clicked.connect(self._toggle_observation)
         self._position_top_buttons()
 
-        # Scene diff label — bottom-left, absolutely positioned, hidden until first capture
+        # Legacy scene-change indicator, hidden until the first capture.
         self._scene_diff_label = QLabel("", self)
         self._scene_diff_label.setStyleSheet(
             "color: rgba(150,150,150,130); font-size: 9px; background: transparent;"
@@ -564,7 +579,7 @@ class OverlayWindow(QWidget):
         self._scene_diff_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._scene_diff_label.hide()
 
-        # Summarization indicator — bottom-left, next to scene diff, hidden until triggered
+        # Summarization indicator beside the scene-change indicator.
         self._summ_label = QLabel("∑", self)
         self._summ_label.setStyleSheet(
             "color: rgba(220,190,80,230); font-size: 9px; background: transparent;"
@@ -574,6 +589,21 @@ class OverlayWindow(QWidget):
         self._summ_timer = QTimer(self)
         self._summ_timer.setSingleShot(True)
         self._summ_timer.timeout.connect(self._summ_label.hide)
+
+        self._observation_status_label = QLabel(self)
+        self._observation_status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._observation_status_label.setStyleSheet(
+            "color: rgba(190,190,210,210); font-size: 10px; background: transparent;"
+        )
+        self._observation_status_label.setMinimumWidth(0)
+        self._observation_status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred,
+        )
+        self._status_layout.addWidget(self._scene_diff_label)
+        self._status_layout.addWidget(self._summ_label)
+        self._status_layout.addWidget(self._observation_status_label, 1)
+        self._status_layout.addWidget(grip)
+        self.update_observation_controls()
 
         # Inline context popup (right-click menu, Wayland-compatible)
         self._ctx_popup = _ContextPopup(self)
@@ -601,16 +631,10 @@ class OverlayWindow(QWidget):
         self._retry_btn.move(context_x - self._retry_btn.width() - 4, 4)
 
     def _position_scene_diff_label(self) -> None:
-        self._scene_diff_label.adjustSize()
-        self._scene_diff_label.move(6, self.height() - self._scene_diff_label.height() - 4)
+        self._status_layout.invalidate()
 
     def _position_summ_label(self) -> None:
-        self._summ_label.adjustSize()
-        if self._scene_diff_label.isVisible():
-            x = 6 + self._scene_diff_label.width() + 6
-        else:
-            x = 6
-        self._summ_label.move(x, self.height() - self._summ_label.height() - 4)
+        self._status_layout.invalidate()
 
     # ------------------------------------------------------------------
     # Public API
@@ -620,10 +644,45 @@ class OverlayWindow(QWidget):
         title = self._cfg.game_title.strip()
         self.setWindowTitle("VNTL 日译中" + (f" · {title}" if title else ""))
 
+    def set_observation_status(self, text: str) -> None:
+        """Report background work without changing subtitles or foreground busy state."""
+        self._observation_status_text = str(text)
+        self.update_observation_controls()
+
+    def update_observation_controls(self) -> None:
+        automatic = self._cfg.translation_mode == "auto"
+        self._translation_mode_btn.setText("自动显示" if automatic else "手动显示")
+        self._translation_mode_btn.setToolTip(
+            "新台词译好后自动显示；点击切换为手动显示。" if automatic else
+            "后台观察并预译，按翻译键显示中文；点击切换为自动显示。"
+        )
+        enabled = self._cfg.observation_enabled
+        self._observation_btn.setText("观察开启" if enabled else "观察暂停")
+        self._observation_btn.setToolTip(
+            "点击暂停后台识屏、场景观察和预译。" if enabled else
+            "点击恢复后台观察；选择游戏窗口后才会开始。"
+        )
+        status = self._observation_status_text if enabled else "后台观察已暂停"
+        self._observation_status_label.setText(status)
+        self._observation_status_label.setToolTip(status)
+
+    def _toggle_translation_mode(self) -> None:
+        self._cfg.translation_mode = "manual" if self._cfg.translation_mode == "auto" else "auto"
+        self._save_fn(self._cfg)
+        self.update_observation_controls()
+
+    def _toggle_observation(self) -> None:
+        self._cfg.observation_enabled = not self._cfg.observation_enabled
+        if self._cfg.observation_enabled:
+            self._observation_status_text = "等待后台观察"
+        self._save_fn(self._cfg)
+        self.update_observation_controls()
+
     def set_busy(self, busy: bool) -> None:
         self.is_busy = busy
         for widget in (self._capture_btn, self._window_btn, self._gear_btn,
-                       self._ctx_popup, self._retry_btn):
+                       self._ctx_popup, self._retry_btn,
+                       self._translation_mode_btn, self._observation_btn):
             widget.setEnabled(not busy)
 
     def update_text(self, jp: str, en: str, replace_last: bool = False) -> None:
@@ -869,7 +928,7 @@ class OverlayWindow(QWidget):
     def _attach_screenshot(self) -> None:
         def do_attach(pid: int) -> bool:
             self._screenshot_service.set_pid(pid)
-            self._en_label.setText("游戏窗口已选择。让游戏画面保持可见，按 Ctrl+Alt+T 翻译。")
+            self.set_observation_status("游戏窗口已选择，等待画面稳定")
             return True
         dlg = ProcessPickerDialog(do_attach, self, title="选择游戏窗口")
         dlg.exec()

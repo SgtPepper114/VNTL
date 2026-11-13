@@ -178,7 +178,7 @@ _STYLE = f"""
         background-color: #5050a0;
         border-color: #7070c0;
     }}
-    QSpinBox {{
+    QSpinBox, QDoubleSpinBox {{
         background-color: #1e1e26;
         color: #ffffff;
         border: 1px solid #3a3a4a;
@@ -187,7 +187,7 @@ _STYLE = f"""
         min-width: 60px;
         max-width: 72px;
     }}
-    QSpinBox::up-button {{
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
         subcontrol-origin: border;
         subcontrol-position: top right;
         width: 18px;
@@ -195,10 +195,10 @@ _STYLE = f"""
         border-top-right-radius: 4px;
         background-color: #2a2a36;
     }}
-    QSpinBox::up-button:hover {{
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover {{
         background-color: #3a3a52;
     }}
-    QSpinBox::down-button {{
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
         subcontrol-origin: border;
         subcontrol-position: bottom right;
         width: 18px;
@@ -206,15 +206,15 @@ _STYLE = f"""
         border-bottom-right-radius: 4px;
         background-color: #2a2a36;
     }}
-    QSpinBox::down-button:hover {{
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
         background-color: #3a3a52;
     }}
-    QSpinBox::up-arrow {{
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
         image: url("{_UP_ARROW_PATH}");
         width: 9px;
         height: 5px;
     }}
-    QSpinBox::down-arrow {{
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
         image: url("{_DOWN_ARROW_PATH}");
         width: 9px;
         height: 5px;
@@ -362,6 +362,7 @@ class SettingsDialog(QDialog):
 
         for title, builder in [
             ("游戏",     self._build_game),
+            ("识屏",     self._build_observation),
             ("外观",     self._build_appearance),
             ("接口与模型", self._build_models_and_apis),
             ("手柄",     self._build_controller),
@@ -594,6 +595,124 @@ class SettingsDialog(QDialog):
         parent.addLayout(row)
         return btn
 
+    def _build_observation(self, parent: QVBoxLayout) -> None:
+        parent.addWidget(QLabel("翻译显示模式："))
+        self._translation_mode_combo = QComboBox()
+        self._translation_mode_combo.addItem("手动显示：按翻译键才显示中文", "manual")
+        self._translation_mode_combo.addItem("自动显示：新台词译好后显示中文", "auto")
+        index = self._translation_mode_combo.findData(self._cfg.translation_mode)
+        self._translation_mode_combo.setCurrentIndex(max(0, index))
+        parent.addWidget(self._translation_mode_combo)
+        mode_note = QLabel(
+            "两种模式都会在后台观察游戏、记录进度，并提前翻译新台词。"
+            "手动模式按翻译键显示当前画面的缓存译文；自动模式译好后直接显示。"
+            "切换模式不会清空剧情记忆。"
+        )
+        mode_note.setWordWrap(True)
+        parent.addWidget(mode_note)
+        self._observation_enabled_check = QCheckBox("连续观察游戏画面")
+        self._observation_enabled_check.setChecked(self._cfg.observation_enabled)
+        parent.addWidget(self._observation_enabled_check)
+        observation_note = QLabel(
+            "只有选择游戏窗口后才开始。关闭后暂停后台识屏、场景观察和预译；"
+            "仍可按翻译键识别当前画面。修改后点击“保存”生效。"
+        )
+        observation_note.setWordWrap(True)
+        observation_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(observation_note)
+        parent.addWidget(_separator())
+
+        def add_spin(label, attr, minimum, maximum, value, suffix, step):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(label))
+            spin = QSpinBox()
+            spin.setRange(minimum, maximum)
+            spin.setSingleStep(step)
+            spin.setSuffix(suffix)
+            spin.setValue(value)
+            row.addWidget(spin)
+            row.addStretch()
+            parent.addLayout(row)
+            setattr(self, attr, spin)
+            return spin
+
+        add_spin("字幕稳定等待：", "_ocr_stable_spin", 200, 2000,
+                 self._cfg.ocr_stable_ms, " 毫秒", 100)
+        add_spin("画面检查间隔：", "_ocr_poll_spin", 100, 1000,
+                 self._cfg.ocr_poll_ms, " 毫秒", 100)
+        timing_note = QLabel(
+            "等待逐字显示的字幕稳定后再识别。稳定等待越短，出译文越快，"
+            "也越容易读到半句；检查间隔越短，本机处理次数越多。"
+        )
+        timing_note.setWordWrap(True)
+        timing_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(timing_note)
+        add_spin("字幕区域起点（窗口高度）：", "_ocr_region_top_spin", 0, 90,
+                 self._cfg.ocr_region_top_percent, "%", 5)
+        region_note = QLabel(
+            "0% 表示整个游戏窗口；60% 表示只读底部 40%。"
+            "《黄昏症候群》的底部对白可尝试 60%；如果菜单或文字在上方，请改回 0%。"
+            "场景观察仍使用完整游戏画面。"
+        )
+        region_note.setWordWrap(True)
+        region_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(region_note)
+        parent.addWidget(_separator())
+        self._scene_observation_check = QCheckBox("后台观察场景（需要支持视觉的模型）")
+        self._scene_observation_check.setChecked(self._cfg.scene_observation_enabled)
+        parent.addWidget(self._scene_observation_check)
+        thresh_row = QHBoxLayout()
+        thresh_row.addWidget(QLabel("场景变化阈值："))
+        self._scene_thresh_slider = QSlider(Qt.Orientation.Horizontal)
+        self._scene_thresh_slider.setRange(0, 100)
+        self._scene_thresh_slider.setValue(_threshold_to_slider(self._cfg.scene_change_threshold))
+        thresh_row.addWidget(self._scene_thresh_slider)
+        initial_threshold = _slider_to_threshold(self._scene_thresh_slider.value())
+        self._scene_thresh_lbl = QLabel(f"{initial_threshold:.1f}%")
+        self._scene_thresh_lbl.setFixedWidth(48)
+        self._scene_thresh_lbl.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        thresh_row.addWidget(self._scene_thresh_lbl)
+        self._scene_thresh_slider.valueChanged.connect(
+            lambda value: self._scene_thresh_lbl.setText(f"{_slider_to_threshold(value):.1f}%")
+        )
+        parent.addLayout(thresh_row)
+        threshold_note = QLabel("数值越小，越容易将画面变化交给视觉模型；字幕区域会参与屏蔽。")
+        threshold_note.setWordWrap(True)
+        threshold_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(threshold_note)
+        scene_row = QHBoxLayout()
+        scene_row.addWidget(QLabel("场景观察最短间隔："))
+        self._scene_observation_interval_spin = QDoubleSpinBox()
+        self._scene_observation_interval_spin.setRange(3.0, 120.0)
+        self._scene_observation_interval_spin.setDecimals(1)
+        self._scene_observation_interval_spin.setSuffix(" 秒")
+        self._scene_observation_interval_spin.setValue(self._cfg.scene_observation_interval)
+        scene_row.addWidget(self._scene_observation_interval_spin)
+        scene_row.addStretch()
+        parent.addLayout(scene_row)
+        scene_note = QLabel(
+            "后台补充人物、地点和画面变化，帮助理解剧情；可能产生视觉模型请求费用。"
+            "场景结果进入记忆，不占用字幕位置。"
+        )
+        scene_note.setWordWrap(True)
+        scene_note.setStyleSheet("color: #aaaacc; font-size: 11px;")
+        parent.addWidget(scene_note)
+        self._observation_enabled_check.toggled.connect(self._refresh_observation_controls)
+        self._scene_observation_check.toggled.connect(self._refresh_observation_controls)
+        self._refresh_observation_controls()
+
+    def _refresh_observation_controls(self) -> None:
+        enabled = self._observation_enabled_check.isChecked()
+        for control in (self._ocr_stable_spin, self._ocr_poll_spin,
+                        self._ocr_region_top_spin, self._scene_observation_check):
+            control.setEnabled(enabled)
+        scene_enabled = enabled and self._scene_observation_check.isChecked()
+        for control in (self._scene_thresh_slider, self._scene_thresh_lbl,
+                        self._scene_observation_interval_spin):
+            control.setEnabled(scene_enabled)
+
     def _build_context(self, parent: QVBoxLayout) -> None:
         # Clipboard toggle
         self._clipboard_check = QCheckBox("自动翻译剪贴板文字")
@@ -611,67 +730,20 @@ class SettingsDialog(QDialog):
 
         # Screenshot toggle
         self._screenshot_check = QCheckBox(
-            "辅助场景描述（截图模型须支持视觉）"
+            "文字钩子／剪贴板的辅助场景描述（兼容功能）"
         )
         self._screenshot_check.setChecked(self._cfg.screenshot_enabled)
         parent.addWidget(self._screenshot_check)
 
         sc_note = QLabel(
-            "为已提取的台词附加画面信息。请先在右键菜单中绑定游戏截图窗口；"
-            "按需截图读字使用“截图翻译”按钮。"
+            "为文字钩子或剪贴板提取的台词附加截图信息，模型须支持视觉。"
+            "请先绑定游戏窗口；持续识屏的场景观察请在“识屏”页设置。"
         )
         sc_note.setWordWrap(True)
         sc_note.setStyleSheet(
             "color: rgba(160,160,160,180); font-size: 8pt; font-style: italic;"
         )
         parent.addWidget(sc_note)
-
-        # Scene change threshold slider
-        parent.addSpacing(4)
-        thresh_row = QHBoxLayout()
-        lbl_thresh = QLabel("场景变化阈值：")
-        lbl_thresh.setFixedWidth(165)
-        thresh_row.addWidget(lbl_thresh)
-
-        self._scene_thresh_slider = QSlider(Qt.Orientation.Horizontal)
-        self._scene_thresh_slider.setRange(0, 100)
-        self._scene_thresh_slider.setValue(_threshold_to_slider(self._cfg.scene_change_threshold))
-        thresh_row.addWidget(self._scene_thresh_slider)
-
-        _init_pct = _slider_to_threshold(self._scene_thresh_slider.value())
-        self._scene_thresh_lbl = QLabel(f"{_init_pct:.1f}%")
-        self._scene_thresh_lbl.setFixedWidth(48)
-        self._scene_thresh_lbl.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        thresh_row.addWidget(self._scene_thresh_lbl)
-
-        self._scene_thresh_slider.valueChanged.connect(
-            lambda v: self._scene_thresh_lbl.setText(f"{_slider_to_threshold(v):.1f}%")
-        )
-        parent.addLayout(thresh_row)
-
-        thresh_note = QLabel("数值越小越敏感。约 1% 可捕捉表情变化，3% 用于人物变化，10% 用于场景切换。")
-        thresh_note.setWordWrap(True)
-        thresh_note.setStyleSheet(
-            "color: rgba(160,160,160,180); font-size: 8pt; font-style: italic;"
-        )
-        parent.addWidget(thresh_note)
-
-        cooldown_row = QHBoxLayout()
-        cooldown_lbl = QLabel("场景识别间隔：")
-        cooldown_lbl.setFixedWidth(165)
-        cooldown_row.addWidget(cooldown_lbl)
-        self._scene_cooldown_spin = QDoubleSpinBox()
-        self._scene_cooldown_spin.setRange(0.0, 10.0)
-        self._scene_cooldown_spin.setSingleStep(0.5)
-        self._scene_cooldown_spin.setDecimals(1)
-        self._scene_cooldown_spin.setSuffix(" 秒")
-        self._scene_cooldown_spin.setValue(self._cfg.scene_change_cooldown)
-        self._scene_cooldown_spin.setMaximumWidth(90)
-        cooldown_row.addWidget(self._scene_cooldown_spin)
-        cooldown_row.addStretch()
-        parent.addLayout(cooldown_row)
 
         parent.addSpacing(4)
 
@@ -707,7 +779,7 @@ class SettingsDialog(QDialog):
 
         # Min recent lines
         lines_row = QHBoxLayout()
-        lbl2 = QLabel("保留最近完整对话：")
+        lbl2 = QLabel("保留最近完整记录：")
         lbl2.setFixedWidth(165)
         lines_row.addWidget(lbl2)
         self._lines_spin = QSpinBox()
@@ -718,7 +790,7 @@ class SettingsDialog(QDialog):
         lines_row.addStretch()
         parent.addLayout(lines_row)
         summary_note = QLabel(
-            "达到 token 阈值且有较早对话可整理时，本次翻译结束后立即在后台整理记忆，"
+            "台词与场景观察均计入近期记录；达到 token 阈值后在后台整理较早记录，"
             "不等待下一条翻译，也不占用字幕位置。最近的指定条数保留完整内容。"
             "整理失败会保留原记忆，不会在空闲时连续重试。"
         )
@@ -1065,6 +1137,14 @@ class SettingsDialog(QDialog):
         self._cfg.game_title = normalize_game_text(self._game_title_edit.text(), GAME_TITLE_MAX_LENGTH)
         self._cfg.game_notes = normalize_game_text(self._game_notes_edit.toPlainText(), GAME_NOTES_MAX_LENGTH)
 
+        self._cfg.observation_enabled = self._observation_enabled_check.isChecked()
+        self._cfg.translation_mode = self._translation_mode_combo.currentData()
+        self._cfg.ocr_stable_ms = self._ocr_stable_spin.value()
+        self._cfg.ocr_poll_ms = self._ocr_poll_spin.value()
+        self._cfg.ocr_region_top_percent = self._ocr_region_top_spin.value()
+        self._cfg.scene_observation_enabled = self._scene_observation_check.isChecked()
+        self._cfg.scene_observation_interval = self._scene_observation_interval_spin.value()
+
         # Controller edits stay local to the dialog until Save is clicked.
         self._cfg.controller_enabled = self._controller_enabled_check.isChecked()
         selected_button = self._controller_button_combo.currentData()
@@ -1119,11 +1199,6 @@ class SettingsDialog(QDialog):
         if self._screenshot_service is not None:
             self._screenshot_service.threshold = _pct
 
-        cooldown = self._scene_cooldown_spin.value()
-        self._cfg.scene_change_cooldown = cooldown
-        if self._screenshot_service is not None:
-            self._screenshot_service.cooldown = cooldown
-
         # System prompts (empty string = use built-in default)
         for attr, edit, default in (
             ("translator_system_prompt", self._translator_prompt_edit, _SYSTEM_PROMPT),
@@ -1135,6 +1210,9 @@ class SettingsDialog(QDialog):
 
         # Appearance is already live in cfg.overlay — write everything to disk
         self._save_fn(self._cfg)
+        refresh_observation = getattr(self._overlay, "update_observation_controls", None)
+        if callable(refresh_observation):
+            refresh_observation()
 
         # Update snapshot so a subsequent Cancel doesn't revert past this save
         self._orig_overlay = copy.deepcopy(self._cfg.overlay)
