@@ -21,6 +21,9 @@ CLAUDE.md
 Thumbs.db
 desktop.ini
 *.lnk
+.env
+.env.*
+validation/
 
 # VS Code
 .vscode/
