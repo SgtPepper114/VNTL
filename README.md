@@ -1,184 +1,129 @@
-# VNTL — 日译中本地改造版
+# VNTL · 日语游戏翻译
 
-本目录已改为简体中文翻译，并增加 ePSXe / PS1 的按需识屏翻译。请先阅读 [使用说明](使用说明.md)。下方保留上游原项目说明，英文翻译及原版操作描述不适用于本地改造部分。
+本仓库 fork 自 [itsNokts/VNTL](https://github.com/itsNokts/VNTL)，在上游文字提取与翻译浮窗的基础上，扩展了简体中文翻译、按需识屏、假名注音、游戏上下文及手柄背键操作。
 
-Real-time Japanese → English translator for Windows visual novels. Hooks into the game's text rendering, extracts Japanese lines as they appear, and displays AI translations in a frameless always-on-top overlay.
+VNTL 是面向 Windows 的日语游戏翻译工具，可通过游戏或模拟器窗口读取画面，也可通过文字钩子、剪贴板获取台词。日文原文与简体中文译文显示在独立浮窗中，配合剧情记忆辅助理解连续对话。
 
-## How it works
+当前版本在 [`codex/vntl-zh`](https://github.com/SgtPepper114/VNTL/tree/codex/vntl-zh) 分支维护。具体操作见 [使用说明](使用说明.md)。
 
-1. A GDI hook DLL is injected into the VN process and intercepts text draw calls (`TextOutW`, `ExtTextOutW`, `GetGlyphOutlineW`, etc.) — no OCR or clipboard polling needed; text is captured at the source before it is drawn.
-2. Captured text is sent to the VNTL backend via a named pipe (`\\.\pipe\vntl_hook`).
-3. A configurable debouncer (default 150 ms) absorbs letter-by-letter reveal animations; the line is only considered complete once the text stops changing.
-4. A short batch window (default 200 ms) coalesces multiple lines that arrive in quick succession into a single translation call.
-5. The completed line — along with the running dialogue history and, optionally, a scene description — is sent to your configured AI provider.
-6. The translation appears in the overlay.
+## 主要功能
 
-## Requirements
+| 功能 | 当前实现 |
+| --- | --- |
+| 按需识屏翻译 | 选择游戏窗口，通过快捷键、浮窗按钮或手柄背键截取当前画面，识别日文并翻译 |
+| 文字提取 | 支持 PC 视觉小说的 GDI 文字钩子，以及剪贴板自动翻译 |
+| 日中双语浮窗 | 显示日文与简体中文，支持拖动、缩放、字体与配色调整 |
+| 汉字假名注音 | 在日文汉字上方显示平假名，可在外观设置中切换 |
+| 游戏上下文 | 配置作品名称、篇章、角色称呼、术语和翻译风格，随模型请求一同发送 |
+| 剧情记忆 | 保存已读对话，达到 token 阈值后自动在后台整理摘要 |
+| 历史与重译 | 查看本次翻译记录、剧情摘要及近期对话，按当前设置重新翻译台词 |
+| 手柄操作 | 支持 USB 连接的 Nintendo Switch 2 Pro 手柄，通过 GR 或 GL 背键触发翻译 |
+| 模型配置 | 分别配置翻译、视觉 / OCR、摘要角色的供应商与模型 |
 
-- Windows 10/11
-- Python 3.11+
-- An API key for at least one supported provider (or a running Ollama instance)
+## 安装与启动
 
-## Setup
+运行环境：Windows 10 / 11、Python 3.11 及以上版本、[uv](https://docs.astral.sh/uv/)。模型服务可选择 API 供应商或本机 Ollama 服务。
 
-```bash
-uv sync
+```powershell
+git clone --branch codex/vntl-zh https://github.com/SgtPepper114/VNTL.git
+cd VNTL
+uv sync --locked
 uv run python main.py
 ```
 
-[uv](https://docs.astral.sh/uv/) handles the virtual environment and dependencies automatically. If you don't have uv, install it first:
+`uv sync --locked` 会依据锁定的依赖版本创建项目虚拟环境。
 
-```bash
-# Windows
-winget install astral-sh.uv
+首次启动后：
 
-# macOS / Linux
-curl -LsSf https://astral.sh/uv/install.sh | sh
+1. 点击浮窗 **⚙ → 接口与模型**，填写 API Key，并为翻译、视觉 / OCR、摘要选择模型。视觉 / OCR 角色使用支持图片输入的模型。
+2. 在 **游戏** 页填写当前游戏名称与补充说明，保存设置。
+3. 启动游戏，点击 **选择游戏窗口**，按窗口标题、程序名或 PID 选择目标。窗口列表将应用排在前面，后台进程放在可展开的分组中。
+4. 保持游戏窗口可见，等台词显示完整后按 **Ctrl+Alt+T**，或点击 **识屏翻译**。
+
+## 常用操作
+
+| 入口 | 操作 |
+| --- | --- |
+| **Ctrl+Alt+T** / **识屏翻译** | 读取当前游戏画面并翻译 |
+| **Ctrl+Alt+H** | 显示或隐藏浮窗 |
+| **↻** | 使用当前设置与上下文，重新翻译最近识别的日文 |
+| **≡** | 查看本次运行的翻译记录 |
+| **Σ** | 查看剧情摘要及近期对话 |
+| **⚙** | 打开设置 |
+| **✕** | 保存当前状态并退出 VNTL |
+| 浮窗右键菜单 | 保存、载入、清空剧情记忆，手动整理摘要，连接文字钩子 |
+
+浮窗支持拖动和调整大小，长段字幕可滚动查看。截图时，VNTL 会短暂隐藏自身窗口，完成截图后恢复显示。
+
+PC 视觉小说可在右键菜单选择 **连接文字钩子（PC 视觉小说）…**，再选择所需文本流。配合外部文本提取工具时，可在 **设置 → 上下文** 启用 **自动翻译剪贴板文字**。
+
+## 汉字上方假名注音
+
+在 **设置 → 外观 → 日文汉字上方显示假名注音** 中切换，初始状态为开启。
+
+注音直接排在对应汉字或词语的上方，例如「学校」上方显示「がっこう」；「感じ」中的「感」上方显示「かん」，后面的「じ」保持原样。中文译文显示在日文下方。
+
+读音由本地 SudachiPy 与 SudachiDict-core 词典生成。切换设置时，字幕、翻译历史和剧情记忆视图会即时预览；点击保存后应用到后续启动。复制、模型请求和记忆文件均使用日文原文。
+
+## 游戏上下文与剧情记忆
+
+**设置 → 游戏** 提供 **当前游戏名称** 和 **补充说明**。可填写作品与篇章、已确认的人物关系、角色称呼、固定术语和对白风格，例如：
+
+> 游戏内角色名保留日文写法；现实人物使用通用中文译名。对白采用自然、简洁的中文。
+
+这些信息会随识屏、翻译、场景描述及摘要请求发送。补充说明中的翻译偏好优先于默认规则和历史译文；保存后从下一次请求生效，也可点击 **↻** 更新当前台词。
+
+剧情记忆由已读取的台词、中文译文、场景信息和摘要组成。**设置 → 上下文** 中可调整：
+
+| 设置 | 默认值 | 作用 |
+| --- | --- | --- |
+| 开始整理记忆的阈值 | 10,000 tokens | 控制自动整理摘要的启动条件 |
+| 摘要目标长度 | 5,000 tokens | 控制摘要篇幅 |
+| 保留最近完整对话 | 30 条 | 保留近期台词与译文的完整内容 |
+
+当估算的上下文达到 token 阈值，且存在可整理的较早对话时，当前翻译显示完成后立即启动后台摘要。浮窗继续显示台词，后续翻译可继续进行；摘要结果更新到剧情记忆及 **Σ** 视图。
+
+成功翻译后会自动保存剧情记忆，启动时恢复。切换作品、存档或路线时，通过右键菜单的保存、载入和清空功能管理对应记忆，并更新当前游戏资料。
+
+## 手柄背键
+
+**设置 → 手柄** 可配置 USB 连接的 Nintendo Switch 2 Pro 手柄。默认由右背键 **GR** 触发识屏翻译，也可选择左背键 **GL**。
+
+VNTL 读取手柄的原始 HID 数据，将一次背键按下转换为一次翻译请求。设置页提供启用开关、按键选择与连接状态。手柄重新连接后，监听会自动恢复。
+
+## 模型与本地数据
+
+支持 DeepSeek、Google、Anthropic、OpenAI 和 Ollama。翻译、视觉 / OCR、摘要三个角色可分别选择供应商与模型；初始配置均为 DeepSeek 的 `deepseek-flash`。**提示词** 页分别编辑翻译、场景描述和摘要的系统提示词。
+
+API Key 可在设置中填写，也可通过 `DEEPSEEK_API_KEY`、`GOOGLE_API_KEY`（或 `GEMINI_API_KEY`）、`ANTHROPIC_API_KEY`、`OPENAI_API_KEY` 环境变量提供。Ollama 服务地址可在设置中配置。
+
+本地数据保存在当前 Windows 用户的 `%USERPROFILE%\.config\vntl\` 目录：
+
+| 路径 | 内容 |
+| --- | --- |
+| `config.json` | 模型连接、游戏资料、外观、操作及上下文配置 |
+| `contexts\` | 自动保存的剧情记忆；手动导出时可选择保存位置 |
+| `vntl.log` | 程序运行日志 |
+| `translate.log`、`describe.log`、`summarize.log` | 对应角色的模型调用记录 |
+
+## 开发与打包
+
+离线测试与格式检查：
+
+```powershell
+uv sync --locked
+uv run python -m unittest discover -s tests -v
+git diff --check
 ```
 
-API keys can be entered in the settings dialog (right-click the overlay → Settings) or supplied via environment variables:
+生成 Windows 程序目录：
 
-```
-ANTHROPIC_API_KEY
-OPENAI_API_KEY
-GOOGLE_API_KEY
+```powershell
+.\build.bat
 ```
 
-## Using VNTL
+构建脚本使用 PyInstaller，将程序、Qt 组件、文字钩子及注音词典打包到 `dist\vntl\`。运行其中的 `vntl.exe`，分发时保留整个目录结构。
 
-1. Launch your visual novel, then launch VNTL.
-2. Right-click the overlay → **Attach to process…** and select the VN.
-3. Advance one line in the VN — VNTL will discover the text streams available.
-4. Right-click the overlay → **Select text streams…** and check the stream(s) that carry the main story text.
-5. Click Save — the current line is translated immediately.
+本仓库的 `main` 分支与上游版本保持对应，当前日译中开发使用 `codex/vntl-zh` 分支。`origin` 对应个人 fork，`upstream` 对应 `itsNokts/VNTL`；提交使用 `feat:`、`fix:`、`docs:` 等 Conventional Commits 类型。
 
-The overlay is draggable and resizable. Right-click for all options (settings, context management, scene description toggle, etc.).
-
-## Text streams
-
-When the hook DLL intercepts a text draw call it records the call-site address inside the VN executable — this address is the **stream ID**. Every distinct piece of rendering code in the game produces its own stream.
-
-A typical VN will expose several streams: story dialogue, speaker names, menu options, system messages, HUD elements, furigana, and so on. The stream picker dialog shows a recent text sample for each stream so you can identify which ones carry the story text. Only checked streams are forwarded to the translator; unchecked streams are silently discarded.
-
-You generally want to enable the one or two streams that contain full dialogue lines and leave everything else unchecked.
-
-## Dialogue context and memory
-
-VNTL maintains a rolling JP→EN dialogue history that is sent alongside each new line. This lets the translator keep character voices, name spellings, honorifics, and terminology consistent across an entire session — rather than translating each line in isolation.
-
-When the history grows large (configurable threshold, default ~10 000 tokens), a **summarizer** model compresses the older portion into a concise reference document. The most recent lines (default 30) are always kept verbatim so the translator has immediate context. The summary is injected at the start of the conversation as a ground-truth reference.
-
-Dialogue contexts are saved automatically and can be managed from the right-click menu (**Save context**, **Load context**, **Clear context**). Loading a saved context lets you resume a session mid-playthrough without losing established terminology.
-
-The **Σ button** on the overlay opens the context viewer — a two-tab window showing exactly what the translator has in memory:
-
-- **Summary** — the compressed reference document produced by the summarizer, covering character profiles, story progress, and established translation choices.
-- **History** — the verbatim JP→EN pairs currently in context, with scene descriptions shown where they were captured. Text in both tabs is selectable and copyable.
-
-This is useful for refreshing memory when resuming a session or checking whether the context has drifted. The viewer updates automatically after compaction, load, and clear.
-
-## Scene description
-
-When enabled (Settings → Screenshot), VNTL periodically captures a 64×64 grayscale thumbnail of the screen and computes the percentage of pixels that changed since the last frame. When the change exceeds the configured threshold, a full JPEG screenshot is sent to the **descriptor** model.
-
-The descriptor produces a short description of what is visible — characters on screen, their expressions, and the setting. This description is prepended to the next translation prompt as `[Scene: …]`, giving the translator visual grounding for lines where the subject or emotional tone is implied by the image rather than stated in the text.
-
-A **scene change cooldown** (default 1.0 s) prevents the descriptor from re-triggering during transition animations or fade effects.
-
-## Clipboard fallback
-
-The built-in GDI hook works well for most VNs but is not universal — some engines render text in ways that bypass the hooked calls entirely. For those cases, VNTL can monitor the system clipboard instead.
-
-Popular third-party text hookers such as [Textractor](https://github.com/Artikash/Textractor) support a much wider range of VN engines and have options to copy hooked text directly to the clipboard. By enabling clipboard mode in VNTL (right-click → **Enable clipboard**) and pointing another hooker at the same game, you get broad engine compatibility while keeping VNTL's translation and context features.
-
-Clipboard mode is also useful for manually pasting any Japanese text you want translated on the fly.
-
-## Supported AI providers
-
-Each of the three roles — **translator**, **descriptor** (scene images), and **summarizer** (context compaction) — can be configured independently with its own provider and model.
-
-| Provider  | Notes |
-|-----------|-------|
-| **Anthropic** | Default. Uses prompt caching on the system prompt and last assistant turn to reduce latency and cost on repeated calls. |
-| **OpenAI** | Standard chat completions. |
-| **Google** | Gemini models via the OpenAI-compatible endpoint. |
-| **Ollama** | Local models. Any Ollama model with vision support can be used as descriptor. |
-
-Default models (used when no model is explicitly set):
-
-| Role        | Anthropic              | OpenAI        | Google              | Ollama        |
-|-------------|------------------------|---------------|---------------------|---------------|
-| Translator  | claude-sonnet-4-6      | gpt-5.2       | gemini-2.5-pro      | qwen3:14b     |
-| Descriptor  | claude-haiku-4-5       | gpt-4o-mini   | gemini-2.5-flash    | qwen2.5vl:7b  |
-| Summarizer  | claude-haiku-4-5       | gpt-5-mini    | gemini-2.5-flash    | qwen3:14b     |
-
-## Timing settings
-
-All timing values are configurable in Settings → Timing:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Text debounce | 150 ms | How long to wait after the last GDI call before treating a line as complete. Increase if lines get cut short; decrease for faster response. |
-| Line batch window | 200 ms | After a line is stable, VNTL waits this long and drains any additional lines from the queue before sending — coalescing multi-part lines into one call. Set to 0 to disable. |
-| Scene change cooldown | 1.0 s | Minimum gap between scene-description triggers. Prevents the descriptor from firing repeatedly during fade/transition animations. |
-| Summary target size | 5 000 tokens | Target length for the compressed context summary produced by the summarizer. |
-
-## Building a distributable
-
-```bat
-build.bat
-```
-
-Output is placed in `dist\vntl\`. Run `dist\vntl\vntl.exe` — the entire `dist\vntl\` folder must be kept together. Requires PyInstaller (installed automatically by the script).
-
-## Building the hook DLLs
-
-Pre-built DLLs (`hook/vntl_hook_x64.dll`, `hook/vntl_hook_x86.dll`, `hook/vntl_inject32.exe`) are committed to the repository — you only need to rebuild if you modify the C source.
-
-VNTL automatically detects whether the target process is 32-bit (WOW64) or 64-bit and injects the appropriate DLL. The 32-bit path also uses `vntl_inject32.exe` as an intermediary because a 64-bit process cannot directly create a remote thread in a 32-bit process.
-
-Requires a MinGW cross-compiler on a Linux host:
-
-```bash
-# Debian/Ubuntu
-sudo apt install gcc-mingw-w64
-
-# Arch/CachyOS
-pacman -S mingw-w64-gcc
-
-cd hook
-make        # builds all targets (x64 DLL, x86 DLL, inject32.exe)
-make clean
-```
-
-## Configuration
-
-Config is stored at `~/.config/vntl/config.json` and written automatically on exit. Saved dialogue contexts live in `~/.config/vntl/contexts/`. Each AI role appends its calls to a dedicated log under `~/.config/vntl/`: `translate.log`, `describe.log`, and `summarize.log`. Each entry records the full system prompt (with substituted variables), the input context, and the model output.
-
-## Architecture (for contributors)
-
-```
-VN process (GDI calls)
-  → vntl_hook_x64/x86.dll     intercepts TextOutW, ExtTextOutW, GetGlyphOutlineW
-  → named pipe \\.\pipe\vntl_hook   wire: [uint64 hook_id][uint32 charLen][wchar_t[]]
-  → HookerService (hooker.py)  TextDebouncer per stream, grouping by hook_id
-  → asyncio.Queue (text_queue)
-  → input_loop (main.py)       clipboard fallback when not attached
-  → Translator.translate()     (translator.py) — builds messages, calls LLM
-  → OverlayWindow.update_text() (overlay.py)
-```
-
-Key files:
-
-| File | Responsibility |
-|------|---------------|
-| `main.py` | Entry point, qasync event loop, `input_loop` |
-| `config.py` | `Config` dataclass, JSON persistence, migration |
-| `translator.py` | All LLM calls, prompt caching, call logging |
-| `context_manager.py` | History, token estimation, summarization trigger |
-| `hooker.py` | Named pipe server, DLL injection, debouncer, stream management |
-| `overlay.py` | PyQt6 overlay UI, stream picker, settings launch |
-| `screenshot_service.py` | Thumbnail diffing, scene change detection |
-| `settings.py` | Settings dialog |
-| `hook/vntl_hook.c` | GDI hook DLL source |
-| `hook/vntl_inject32.c` | 32-bit injection helper source |
+感谢 [itsNokts/VNTL](https://github.com/itsNokts/VNTL) 提供文字钩子、翻译流程与浮窗基础，以及 [SudachiPy](https://github.com/WorksApplications/SudachiPy)、[SudachiDict](https://github.com/WorksApplications/SudachiDict) 和 [SDL](https://github.com/libsdl-org/SDL) 等项目提供的词典工具与手柄协议参考。
