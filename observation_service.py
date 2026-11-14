@@ -23,6 +23,8 @@ from text_stability import TextStabilizer
 logger = logging.getLogger(__name__)
 
 _LOCAL_ERROR_LOG_INTERVAL = 30.0
+_VIEWPORT_TIMEOUT = 12.0
+_VIEWPORT_RETRY_DELAYS = (5.0, 15.0, 30.0, 60.0)
 # These messages originate in our capture code. Unknown exception text can
 # contain signed URLs or credentials, so it is never shown or logged here.
 _SAFE_CAPTURE_REASONS = frozenset({
@@ -119,13 +121,17 @@ class ObservationService:
         self._viewport_size = None
         self._viewport_rect = None
         self._viewport_fallback = False
+        self._viewport_task = None
+        self._viewport_retry_at = None
+        self._viewport_failures = 0
         self.metrics = {"frames": 0, "ocr_calls": 0, "observations": 0,
                         "translation_calls": 0, "scene_calls": 0, "vision_fallbacks": 0}
         self.configure()
 
     def _set_status(self, text):
         if self._viewport_fallback:
-            text += " · 游戏画面标定未完成，使用完整窗口"
+            text += (" · 游戏画面后台标定中，使用完整窗口" if self._viewport_task is not None
+                     else " · 游戏画面标定未完成，使用完整窗口，稍后自动重试")
         if text != self._status:
             self._status = text
             self.on_status(text)
@@ -216,6 +222,9 @@ class ObservationService:
         self._ocr_failed_until = 0.0
         self._viewport_size = self._viewport_rect = None
         self._viewport_fallback = False
+        self._viewport_task = None
+        self._viewport_retry_at = None
+        self._viewport_failures = 0
         self._wake.set()
 
     def start(self):
@@ -234,6 +243,13 @@ class ObservationService:
             self._not_ready_reason = "选择游戏窗口后开始本地观察"
             self._set_status(self._not_ready_reason)
             return
+        if self._viewport_fallback:
+            # Let the serial sampler retry with its next fresh capture. A
+            # normal translation key also works before the retry button is
+            # visible. Repeated presses never duplicate a pending calibration.
+            self._viewport_failures = 0
+            self._viewport_retry_at = time.monotonic()
+            self._wake.set()
         if self._blocked_reason:
             # Wake the existing serial sampler instead of creating a second
             # capture/OCR task. Repeated key presses collapse into this event.
@@ -283,40 +299,80 @@ class ObservationService:
                 and self.target_key() == self._target
                 and (ref is None or self.context.get_observation(*ref) is not None))
 
-    async def _prepare_game_frame(self, image, epoch, target):
-        """Calibrate once per target/size; all later frames crop locally."""
-        if not self.cfg.auto_game_viewport:
-            return image
-        if self._viewport_size == image.size:
-            return image.crop(self._viewport_rect) if self._viewport_rect else image
-        self._valid = False
-        self._not_ready_reason = "正在识别游戏画面范围…"
-        self._set_status(self._not_ready_reason)
-        bounds = None
+    async def _locate_game_viewport(self, image):
+        """One bounded request; results are applied only by the frame sampler."""
         try:
-            request = self._spawn(self.translator.locate_game_viewport(
-                ScreenshotService.encode_frame(image)))
-            bounds = await asyncio.wait_for(request, 12)
-        except asyncio.CancelledError:
-            # Configuration/target reset cancels the old child request. App
-            # shutdown cancels the sampler itself and must propagate normally.
-            if self._closed or asyncio.current_task().cancelling():
-                raise
-            return None
+            return await asyncio.wait_for(self.translator.locate_game_viewport(
+                ScreenshotService.encode_frame(image)), _VIEWPORT_TIMEOUT)
         except Exception as exc:
             logger.warning("Game viewport calibration failed: %s", type(exc).__name__)
-        if not self._live(epoch) or target != self.target_key():
             return None
-        self._viewport_size = image.size
+
+    def _record_game_viewport(self, image, bounds):
         self._viewport_rect = None
         if bounds is not None:
             left, top, right, bottom = bounds
             self._viewport_rect = (round(left * image.width), round(top * image.height),
                                    round(right * image.width), round(bottom * image.height))
         self._viewport_fallback = self._viewport_rect is None
-        self._not_ready_reason = "等待读取当前画面…"
-        self._set_status(self._not_ready_reason)
+        if self._viewport_fallback:
+            delay = _VIEWPORT_RETRY_DELAYS[self._viewport_failures]
+            self._viewport_failures = min(self._viewport_failures + 1, len(_VIEWPORT_RETRY_DELAYS) - 1)
+            self._viewport_retry_at = time.monotonic() + delay
+        else:
+            self._viewport_retry_at = None
+            self._viewport_failures = 0
         self.metrics["viewport_calibrations"] = self.metrics.get("viewport_calibrations", 0) + 1
+        self._set_status(self._blocked_reason or self._not_ready_reason or "持续观察中")
+
+    async def _prepare_game_frame(self, image, epoch, target):
+        """Calibrate initially, then retry in the background while OCR continues."""
+        if not self._live(epoch) or target != self.target_key():
+            return None
+        if not self.cfg.auto_game_viewport:
+            return image
+        if self._viewport_size is not None and self._viewport_size != image.size:
+            requested = self._requested
+            self.reset()
+            self._requested = requested
+            epoch, target = self._epoch, self._target
+        if self._viewport_size == image.size:
+            if self._viewport_task is not None and self._viewport_task.done():
+                bounds = self._viewport_task.result()
+                self._viewport_task = None
+                if bounds is not None:
+                    # Full-window OCR, stability and translations belong to the
+                    # old geometry. Invalidate them before cropping this fresh
+                    # capture, never replaying the calibration request's image.
+                    requested = self._requested
+                    self.reset()
+                    self._requested = requested
+                    self._viewport_size = image.size
+                self._record_game_viewport(image, bounds)
+            elif (self._viewport_task is None and self._viewport_retry_at is not None
+                  and time.monotonic() >= self._viewport_retry_at):
+                self._viewport_retry_at = None
+                self._viewport_task = self._spawn(self._locate_game_viewport(image.copy()))
+                self._set_status(self._blocked_reason or self._not_ready_reason or "持续观察中")
+            return image.crop(self._viewport_rect) if self._viewport_rect else image
+        self._viewport_size = image.size
+        self._valid = False
+        self._not_ready_reason = "正在识别游戏画面范围…"
+        self._set_status(self._not_ready_reason)
+        request = self._viewport_task = self._spawn(self._locate_game_viewport(image.copy()))
+        try:
+            bounds = await request
+        except asyncio.CancelledError:
+            # Configuration/target reset cancels the old child request. App
+            # shutdown cancels the sampler itself and must propagate normally.
+            if self._closed or asyncio.current_task().cancelling():
+                raise
+            return None
+        if not self._live(epoch) or target != self.target_key() or self._viewport_task is not request:
+            return None
+        self._viewport_task = None
+        self._not_ready_reason = "等待读取当前画面…"
+        self._record_game_viewport(image, bounds)
         return image.crop(self._viewport_rect) if self._viewport_rect else image
 
     async def run(self):
@@ -342,15 +398,11 @@ class ObservationService:
                     if not self._live(epoch) or target != self.target_key():
                         continue
                     self._blocked_reason = None
-                    if (self.cfg.auto_game_viewport and self._viewport_size is not None
-                            and self._viewport_size != image.size):
-                        requested = self._requested
-                        self.reset()
-                        self._requested = requested
-                        epoch, target = self._epoch, self._target
                     image = await self._prepare_game_frame(image, epoch, target)
                     if image is None:
                         continue
+                    # A new viewport invalidates the previous observation epoch.
+                    epoch, target = self._epoch, self._target
                     self._blocked_reason = None
                     self.metrics["frames"] += 1
                     top = round(image.height * self.cfg.ocr_region_top_percent / 100)
