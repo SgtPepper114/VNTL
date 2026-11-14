@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,6 +90,77 @@ class InputLoopTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(RuntimeError, "先关闭设置"):
                 await main.capture_game(Mock())
         fake_app.topLevelWidgets.assert_not_called()
+
+    async def test_manual_capture_keeps_both_layers_visible_and_runs_off_gui_thread(self):
+        foreground, backdrop, hidden = Mock(), Mock(), Mock()
+        for window, hwnd in ((foreground, 101), (backdrop, 102)):
+            window.isVisible.return_value = True
+            window.winId.return_value = hwnd
+        hidden.isVisible.return_value = False
+        app = SimpleNamespace(activeModalWidget=lambda: None,
+                              topLevelWidgets=lambda: [foreground, backdrop, hidden])
+        screenshots = Mock()
+        gui_thread = threading.get_ident()
+        exclusion_threads = []
+        capture_threads = []
+
+        def exclude(hwnd):
+            exclusion_threads.append(threading.get_ident())
+            return True
+
+        def capture():
+            capture_threads.append(threading.get_ident())
+            return "jpeg"
+
+        screenshots.exclude_window.side_effect = exclude
+        screenshots.capture_for_text.side_effect = capture
+        with patch.object(main, "QApplication", app):
+            for _ in range(3):
+                self.assertEqual(await main.capture_game(screenshots), "jpeg")
+        self.assertEqual([call.args[0] for call in screenshots.exclude_window.call_args_list],
+                         [101, 102] * 3)
+        self.assertTrue(all(t == gui_thread for t in exclusion_threads))
+        self.assertTrue(all(t != gui_thread for t in capture_threads))
+        hidden.winId.assert_not_called()
+        screenshots.capture_frame.assert_not_called()
+        for window in (foreground, backdrop, hidden):
+            window.hide.assert_not_called()
+            window.show.assert_not_called()
+
+    async def test_manual_capture_stops_if_backdrop_cannot_be_excluded(self):
+        foreground, backdrop = Mock(), Mock()
+        for window, hwnd in ((foreground, 101), (backdrop, 102)):
+            window.isVisible.return_value = True
+            window.winId.return_value = hwnd
+        app = SimpleNamespace(activeModalWidget=lambda: None,
+                              topLevelWidgets=lambda: [foreground, backdrop])
+        screenshots = Mock()
+        screenshots.exclude_window.side_effect = [True, False]
+        screenshots.exclusion_error_text.return_value = "浮窗无法从截图中排除（Windows 错误 8）"
+        with patch.object(main, "QApplication", app):
+            with self.assertRaisesRegex(RuntimeError, "Windows 错误 8"):
+                await main.capture_game(screenshots)
+        screenshots.capture_for_text.assert_not_called()
+        for window in (foreground, backdrop):
+            window.hide.assert_not_called()
+            window.show.assert_not_called()
+
+    async def test_manual_capture_failure_preserves_window_visibility(self):
+        visible, hidden = Mock(), Mock()
+        visible.isVisible.return_value = True
+        visible.winId.return_value = 101
+        hidden.isVisible.return_value = False
+        app = SimpleNamespace(activeModalWidget=lambda: None,
+                              topLevelWidgets=lambda: [visible, hidden])
+        screenshots = Mock()
+        screenshots.exclude_window.return_value = True
+        screenshots.capture_for_text.side_effect = RuntimeError("游戏窗口已最小化")
+        with patch.object(main, "QApplication", app):
+            with self.assertRaisesRegex(RuntimeError, "游戏窗口已最小化"):
+                await main.capture_game(screenshots)
+        for window in (visible, hidden):
+            window.hide.assert_not_called()
+            window.show.assert_not_called()
 
     def test_clear_requests_removes_pending_previous_route(self):
         requests = asyncio.Queue(maxsize=1)

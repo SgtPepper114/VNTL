@@ -118,3 +118,11 @@ Windows 浮窗改为前景内容层与背景层分别渲染，背景滑块仅控
 Windows API 连接改用局部 truststore 上下文，通过系统证书库验证；域名校验与 `CERT_REQUIRED` 保持开启。显式 `SSL_CERT_FILE` / `SSL_CERT_DIR` 延续 HTTPX 原优先级，代理及 `NO_PROXY` 继续按环境生效。实现参考 [HTTPX SSL 指南](https://www.python-httpx.org/advanced/ssl/) 与 [truststore 文档](https://truststore.readthedocs.io/en/latest/)。
 
 生产 SDK 的进程内直连试验设置 `NO_PROXY=*`，确认代理 transport 数为 0。真实翻译耗时 **0.755 秒**，真实游戏画面标定耗时 **0.799 秒**。最终 **354 项测试通过**；安装包已包含 `tls_client`、`truststore._api` 和 `truststore._windows`。已启动的打包实例随后也成功完成一次 DeepSeek 摘要请求，HTTP 200。
+
+## 2026-11-15：主动截图期间保持浮窗显示
+
+后台观察关闭时，主动识屏曾执行隐藏所有浮窗、等待 150 毫秒、截图、恢复显示的旧流程。主动识屏与后台观察现在共用窗口截图排除逻辑，在 Qt 线程上处理所有可见顶层窗口，包括字幕前景和独立背景，再到工作线程读取选定窗口与编码图片。主动截图保留从浮窗按钮触发的用法；背景观察继续检查游戏前台状态。
+
+原生验证使用自建底景与真实浮窗，直接调用 `capture_game → capture_for_text → MSS → JPEG`。首次从两层排除标记均为 0 开始，设置后立即截图，随后连续重复 4 次。五次截图都还原合成底景，JPEG 最大通道误差为 1；文字层和背景层的显示、隐藏事件均为 0，前台焦点保持原状。验证入口为 `python -m tests.test_capture_overlay --native-probe OUTPUT_DIR`。
+
+**357 项自动化测试通过**，新增覆盖主动截图双层排除、隐藏窗口保留、GUI 与截图线程分工、排除失败中止及截图异常时的可见性保持。构建脚本支持传递 `--distpath` 等 PyInstaller 参数，新版可输出到独立目录，现有实例由用户自行退出和切换。

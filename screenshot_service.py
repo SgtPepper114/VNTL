@@ -152,7 +152,7 @@ class ScreenshotService:
         """Keep an owned VNTL window visible but out of desktop captures.
 
         Windows 10 2004+ supplies the pixels behind an excluded window. Older
-        versions only produce black rectangles, so continuous capture refuses
+        versions only produce black rectangles, so window capture refuses
         that path. Call on the Qt thread for each visible top-level window.
         """
         if sys.platform != "win32" or sys.getwindowsversion().build < 19041:
@@ -165,11 +165,11 @@ class ScreenshotService:
     @staticmethod
     def exclusion_error_text() -> str:
         if sys.platform != "win32":
-            return "持续观察的窗口截图需要 Windows。"
+            return "窗口截图需要 Windows。"
         if sys.getwindowsversion().build < 19041:
-            return "当前 Windows 版本需要更新到 Windows 10 2004 或更高版本以支持持续截图。"
+            return "当前 Windows 版本需要更新到 Windows 10 2004 或更高版本以支持窗口截图。"
         return (f"浮窗无法从截图中排除（Windows 错误 {ctypes.get_last_error()}）。"
-                "请重启更新后的 VNTL；也可暂停观察后使用按键识屏。")
+                "请手动重启更新后的 VNTL 再试。")
 
     def capture_frame(self):
         """Quiet continuous capture, paused while another application has focus.
@@ -202,7 +202,7 @@ class ScreenshotService:
     def _capture_bound_image(self):
         """Read only the selected game's visible client area, never the desktop.
 
-        This uses screen pixels, so callers must hide their own overlay before
+        This uses screen pixels, so callers must exclude their own windows before
         capture and the player must keep the game visible and unobscured.
         """
         if not _AVAILABLE:

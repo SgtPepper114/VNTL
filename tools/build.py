@@ -17,6 +17,6 @@ if sys.platform == "win32":
                    Path(sys.base_prefix) / "DLLs", windows_dir / "System32", windows_dir)
     environment["PATH"] = os.pathsep.join(dict.fromkeys(map(str, directories)))
 raise SystemExit(subprocess.call(
-    [sys.executable, "-m", "PyInstaller", "--noconfirm", str(root / "vntl.spec")],
+    [sys.executable, "-m", "PyInstaller", "--noconfirm", *sys.argv[1:], str(root / "vntl.spec")],
     cwd=root, env=environment,
 ))

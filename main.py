@@ -77,28 +77,26 @@ def friendly_error(exc: Exception) -> str:
     return f"处理失败（{name}），请重试。"
 
 
+def exclude_capture_windows(screenshots: ScreenshotService) -> None:
+    """Exclude visible VNTL windows on the Qt thread, preserving visibility."""
+    for window in QApplication.topLevelWidgets():
+        if window.isVisible() and not screenshots.exclude_window(int(window.winId())):
+            raise RuntimeError(screenshots.exclusion_error_text())
+
+
 async def capture_game(screenshots: ScreenshotService) -> str:
-    """Keep our own floating windows out of the visible-screen capture."""
+    """Capture on demand while keeping the overlay and its backdrop visible."""
     if QApplication.activeModalWidget() is not None:
         raise RuntimeError("请先关闭设置或文件选择窗口，再识屏翻译。")
-    visible = [w for w in QApplication.topLevelWidgets() if w.isVisible()]
-    try:
-        for window in visible:
-            window.hide()
-        await asyncio.sleep(0.15)
-        return screenshots.capture_for_text()
-    finally:
-        for window in visible:
-            window.show()
+    exclude_capture_windows(screenshots)
+    return await asyncio.to_thread(screenshots.capture_for_text)
 
 
 async def capture_observation(screenshots: ScreenshotService):
     """Keep Qt responsive and avoid hiding/showing windows in a capture loop."""
     if QApplication.activeModalWidget() is not None:
         raise RuntimeError("设置窗口打开时观察暂停，关闭后自动继续。")
-    for window in QApplication.topLevelWidgets():
-        if window.isVisible() and not screenshots.exclude_window(int(window.winId())):
-            raise RuntimeError(screenshots.exclusion_error_text())
+    exclude_capture_windows(screenshots)
     return await asyncio.to_thread(screenshots.capture_frame)
 
 
