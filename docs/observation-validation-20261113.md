@@ -106,3 +106,15 @@ Windows 浮窗改为前景内容层与背景层分别渲染，背景滑块仅控
 本机 200% DPI 下对真实 `OverlayWindow` 做原生合成验证：背景 alpha 0、128、255 时，**71,665 个前景像素全部保持一致**，其中含 4,301 个亮色文字像素；零透明度处显示底景，完全不透明时显示配置的背景色。两层窗口均成功应用截图排除，截取像素恢复为底景，前台焦点保持原状。
 
 颜色选择器与透明度滑块同步，保留颜色选择器的精确 alpha；设置取消恢复修改前外观。Windows 原生透明设置失败时恢复普通窗口样式，维持文字和控件可见。此版本 **326 项自动化测试通过**。
+
+## 2026-11-14：标定恢复与 HTTPS 直连
+
+日志确认模型请求出现 `APIConnectionError`，首次标定失败又被缓存为该窗口尺寸的永久结果。标定现在按 5、15、30、60 秒间隔后台重试，后续间隔保持 60 秒；普通翻译键可提前触发。重试期间本地观察继续进行，成功后在最新截图上应用边界并清理旧几何下的缓存。代理及证书环境变化时刷新 API 连接，正在执行的旧请求完成后再关闭旧连接。
+
+独立实验主动让首次标定返回失败，5 秒后交给真实 API。请求期间采样帧数由 26 增至 32，随后获得有效边界、完成一次翻译并显示，失败提示清除。此试验使用录制截图与独立内存，首次失败为测试注入。
+
+直连证书对照使用相同的 `https://api.deepseek.com/models`，全部绕过 HTTP 代理且保留验证：默认 certifi 信任库报 `SSLCertVerificationError` 代码 19；Windows 系统信任库与 truststore 均获得 HTTP 401，表明 TLS 握手与 HTTP 访问成功。直连叶证书的签发者为 `Kaspersky Anti-Virus Personal Root Certificate`，域名为 `api.deepseek.com`。本机 Windows 已信任该安全软件证书，SDK 的独立 certifi 证书包未包含它。
+
+Windows API 连接改用局部 truststore 上下文，通过系统证书库验证；域名校验与 `CERT_REQUIRED` 保持开启。显式 `SSL_CERT_FILE` / `SSL_CERT_DIR` 延续 HTTPX 原优先级，代理及 `NO_PROXY` 继续按环境生效。实现参考 [HTTPX SSL 指南](https://www.python-httpx.org/advanced/ssl/) 与 [truststore 文档](https://truststore.readthedocs.io/en/latest/)。
+
+生产 SDK 的进程内直连试验设置 `NO_PROXY=*`，确认代理 transport 数为 0。真实翻译耗时 **0.755 秒**，真实游戏画面标定耗时 **0.799 秒**。最终 **354 项测试通过**；安装包已包含 `tls_client`、`truststore._api` 和 `truststore._windows`。已启动的打包实例随后也成功完成一次 DeepSeek 摘要请求，HTTP 200。

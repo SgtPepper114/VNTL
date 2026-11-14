@@ -6,13 +6,17 @@ import datetime
 import json
 import logging
 import math
+import os
 import re
+import ssl
+import urllib.request
 from pathlib import Path
 
 import anthropic
 
 from config import Config
 from context_manager import ContextManager
+from tls_client import tls_verification
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,44 @@ _TRANSLATE_LOG    = _LOG_DIR / "translate.log"
 _DESCRIBE_LOG     = _LOG_DIR / "describe.log"
 _SUMMARIZE_LOG    = _LOG_DIR / "summarize.log"
 _MAX_LOG_ENTRIES  = 5
+
+
+def _network_settings_signature() -> tuple:
+    """Mirror HTTPX's system/environment proxy and certificate inputs privately."""
+    proxies = urllib.request.getproxies()
+    return (
+        tuple((key, proxies.get(key)) for key in ("http", "https", "all", "no")),
+        os.environ.get("SSL_CERT_FILE"),
+        os.environ.get("SSL_CERT_DIR"),
+    )
+
+
+def _safe_error_summary(error: BaseException) -> str:
+    """Report causes without serializing URLs, credentials, bodies or certificates."""
+    tls_reasons = {
+        2: "issuer certificate unavailable",
+        9: "certificate not yet valid",
+        10: "certificate expired",
+        18: "self-signed certificate",
+        19: "self-signed certificate in chain",
+        20: "local issuer certificate unavailable",
+        21: "first certificate could not be verified",
+        23: "certificate revoked",
+        62: "hostname mismatch",
+    }
+    parts = []
+    seen = set()
+    while error is not None and id(error) not in seen and len(parts) < 8:
+        seen.add(id(error))
+        detail = type(error).__name__
+        if isinstance(error, ssl.SSLCertVerificationError):
+            # verify_message can contain server-controlled names. Use known codes.
+            reason = tls_reasons.get(getattr(error, "verify_code", None),
+                                     "certificate verification failed")
+            detail += f" ({reason})"
+        parts.append(detail)
+        error = error.__cause__ or (None if error.__suppress_context__ else error.__context__)
+    return " -> ".join(parts)
 
 
 _SYSTEM_PROMPT = """\
@@ -159,6 +201,9 @@ class Translator:
         self._cfg = cfg
         self._context = context
         self._clients: dict[str, object] = {}
+        self._network_signature = _network_settings_signature()
+        self._active_clients: dict[int, int] = {}
+        self._retired_clients: dict[int, object] = {}
         self.last_compact_error: bool = False
         self._summary_request: object | None = None
 
@@ -174,14 +219,21 @@ class Translator:
     def _build_client(self, provider: str) -> object:
         cfg = self._cfg
         if provider == "anthropic":
-            return anthropic.AsyncAnthropic(api_key=cfg.anthropic_api_key)
+            return anthropic.AsyncAnthropic(
+                api_key=cfg.anthropic_api_key,
+                http_client=anthropic.DefaultAsyncHttpxClient(verify=tls_verification()),
+            )
         import openai as _openai
         if provider == "openai":
-            return _openai.AsyncOpenAI(api_key=cfg.openai_api_key)
+            return _openai.AsyncOpenAI(
+                api_key=cfg.openai_api_key,
+                http_client=_openai.DefaultAsyncHttpxClient(verify=tls_verification()),
+            )
         if provider == "google":
             return _openai.AsyncOpenAI(
                 api_key=cfg.google_api_key,
                 base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+                http_client=_openai.DefaultAsyncHttpxClient(verify=tls_verification()),
             )
         if provider == "deepseek":
             return _openai.AsyncOpenAI(
@@ -189,20 +241,64 @@ class Translator:
                 base_url="https://api.deepseek.com",
                 timeout=45.0,
                 max_retries=1,
+                http_client=_openai.DefaultAsyncHttpxClient(verify=tls_verification()),
             )
         if provider == "ollama":
             return _openai.AsyncOpenAI(
                 base_url=cfg.ollama_base_url,
                 api_key="ollama",
+                http_client=_openai.DefaultAsyncHttpxClient(verify=tls_verification()),
             )
         raise ValueError(f"Unknown provider: {provider!r}")
 
     def rebuild_clients(self) -> None:
         """Rebuild API clients from current config. Call after key/URL/provider changes."""
-        self._clients = {}
-        for provider in {self._cfg.translator_provider, self._cfg.descriptor_provider,
-                         self._cfg.summarizer_provider}:
-            self._clients[provider] = self._build_client(provider)
+        self._replace_clients(
+            {self._cfg.translator_provider, self._cfg.descriptor_provider,
+             self._cfg.summarizer_provider},
+            _network_settings_signature(),
+        )
+
+    def _replace_clients(self, providers: set[str], signature: tuple) -> None:
+        """Swap a complete generation; active calls retain their original clients."""
+        replacements = {}
+        try:
+            for provider in providers:
+                replacements[provider] = self._build_client(provider)
+        except BaseException:
+            # Preserve working clients if one constructor fails. Dispose of any
+            # partial replacement on the next async cleanup without logging it.
+            live_ids = {id(client) for client in self._clients.values()}
+            self._retired_clients.update(
+                (id(client), client) for client in replacements.values()
+                if id(client) not in live_ids
+            )
+            raise
+        previous = self._clients
+        self._clients = replacements
+        self._network_signature = signature
+        live_ids = {id(client) for client in replacements.values()}
+        for identity in live_ids:
+            self._retired_clients.pop(identity, None)
+        self._retired_clients.update(
+            (id(client), client) for client in previous.values()
+            if id(client) not in live_ids
+        )
+
+    async def _close_retired_clients(self) -> None:
+        for identity, client in list(self._retired_clients.items()):
+            if self._active_clients.get(identity, 0):
+                continue
+            # Pop before awaiting: concurrent requests must not close it twice.
+            if self._retired_clients.pop(identity, None) is None:
+                continue
+            close = getattr(client, "close", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception as exc:
+                    logger.warning("Retired API client cleanup failed: %s",
+                                   _safe_error_summary(exc))
 
     # ------------------------------------------------------------------
     # Unified API call dispatcher
@@ -219,7 +315,46 @@ class Translator:
         think: bool = True,
         reasoning_effort: str | None = None,
     ) -> str:
-        client = self._clients[provider]
+        client = None
+        try:
+            signature = _network_settings_signature()
+            if signature != self._network_signature:
+                # SDK transports snapshot Windows/system proxies at creation.
+                # Keep default verified TLS and let fresh transports reread them.
+                self._replace_clients(set(self._clients), signature)
+                logger.info("Network settings changed; refreshed API clients.")
+            client = self._clients[provider]
+            identity = id(client)
+            self._active_clients[identity] = self._active_clients.get(identity, 0) + 1
+            await self._close_retired_clients()
+            return await self._call_client(
+                client, provider, model, system, messages, max_tokens,
+                use_cache, think, reasoning_effort,
+            )
+        except Exception as exc:
+            logger.warning("Provider request failed: %s", _safe_error_summary(exc))
+            raise
+        finally:
+            if client is not None:
+                remaining = self._active_clients[id(client)] - 1
+                if remaining:
+                    self._active_clients[id(client)] = remaining
+                else:
+                    del self._active_clients[id(client)]
+            await self._close_retired_clients()
+
+    async def _call_client(
+        self,
+        client: object,
+        provider: str,
+        model: str,
+        system: str,
+        messages: list[dict],
+        max_tokens: int,
+        use_cache: bool = False,
+        think: bool = True,
+        reasoning_effort: str | None = None,
+    ) -> str:
 
         if provider == "anthropic":
             if use_cache:
