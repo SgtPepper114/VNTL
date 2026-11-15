@@ -34,6 +34,7 @@ from config import (
     GAME_TITLE_MAX_LENGTH, GAME_NOTES_MAX_LENGTH, normalize_game_text,
 )
 from translator import _SYSTEM_PROMPT, _SUMMARIZE_SYSTEM, _DESCRIBE_SYSTEM
+from controller_binding import binding_label, normalize_binding
 
 
 def _slider_to_threshold(pos: int) -> float:
@@ -437,27 +438,55 @@ class SettingsDialog(QDialog):
         self._game_notes_count_label.setText(f"{len(text)} / {GAME_NOTES_MAX_LENGTH} 字")
 
     def _build_controller(self, parent: QVBoxLayout) -> None:
-        self._controller_enabled_check = QCheckBox("启用 Switch2 Pro 背键翻译")
+        self._controller_service = getattr(self._overlay, "controller_service", None)
+        self._controller_binding_draft = normalize_binding(self._cfg.controller_binding)
+        self._controller_learning = False
+        self._controller_accept_result = False
+        self._controller_closed = False
+        self._controller_signal_connected = False
+        self._controller_enabled_check = QCheckBox("启用手柄翻译")
         self._controller_enabled_check.setChecked(self._cfg.controller_enabled)
         parent.addWidget(self._controller_enabled_check)
 
         row = QHBoxLayout()
-        row.addWidget(QLabel("翻译按键："))
-        self._controller_button_combo = QComboBox()
-        self._controller_button_combo.addItem("GR · 右背键", "GR")
-        self._controller_button_combo.addItem("GL · 左背键", "GL")
-        index = self._controller_button_combo.findData(self._cfg.controller_button)
-        self._controller_button_combo.setCurrentIndex(max(0, index))
-        self._controller_button_combo.setEnabled(self._controller_enabled_check.isChecked())
-        self._controller_enabled_check.toggled.connect(self._controller_button_combo.setEnabled)
-        row.addWidget(self._controller_button_combo)
-        row.addStretch()
+        row.addWidget(QLabel("输入设备："))
+        self._controller_device_combo = QComboBox()
+        self._controller_device_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        row.addWidget(self._controller_device_combo, 1)
+        self._controller_refresh_btn = QPushButton("刷新设备")
+        self._controller_refresh_btn.clicked.connect(self._refresh_controller_devices)
+        row.addWidget(self._controller_refresh_btn)
         parent.addLayout(row)
 
+        parent.addWidget(QLabel("翻译按键："))
+        self._controller_binding_label = QLabel(binding_label(self._controller_binding_draft))
+        self._controller_binding_label.setWordWrap(True)
+        parent.addWidget(self._controller_binding_label)
+        self._controller_axes_check = QCheckBox("同时录入扳机／摇杆方向")
+        parent.addWidget(self._controller_axes_check)
+
+        row = QHBoxLayout()
+        self._controller_learn_btn = QPushButton("录入按键")
+        self._controller_cancel_learn_btn = QPushButton("取消录入")
+        self._controller_clear_btn = QPushButton("清除绑定")
+        self._controller_learn_btn.clicked.connect(self._start_controller_learning)
+        self._controller_cancel_learn_btn.clicked.connect(self._cancel_controller_learning)
+        self._controller_clear_btn.clicked.connect(self._clear_controller_binding)
+        for widget in (self._controller_learn_btn, self._controller_cancel_learn_btn, self._controller_clear_btn):
+            row.addWidget(widget)
+        row.addStretch()
+        parent.addLayout(row)
+        self._controller_learning_label = QLabel()
+        self._controller_learning_label.setWordWrap(True)
+        parent.addWidget(self._controller_learning_label)
+
         instructions = QLabel(
-            "请通过 USB 连接 Switch2 Pro 手柄，并使用手柄上已启用的背键。\n\n"
-            "按下一次翻译当前游戏画面，长按不会连续触发。背键直接触发翻译，不发送键盘按键。\n\n"
-            "这里只读取现有背键状态，不会更改手柄或游戏的按键映射。点击“保存”后立即生效。"
+            "选择设备后点击“录入按键”，先松开按键并保持摇杆静止，再单独按一下目标控件并松开。"
+            "录入完成后点击“保存”应用；取消设置保留原有绑定。\n\n"
+            "USB 与蓝牙手柄通过 SDL 读取系统可识别的按钮和方向键。启用上方选项后，"
+            "还可录入扳机或摇杆方向；按钮名称使用 SDL 提供的编号。"
+            "Switch 2 Pro USB 另提供 GR／GL 原始背键入口。\n\n"
+            "保存后每次按下触发一次翻译，长按保持一次请求。游戏自身的按键功能仍按游戏映射执行。"
         )
         instructions.setWordWrap(True)
         parent.addWidget(instructions)
@@ -468,20 +497,143 @@ class SettingsDialog(QDialog):
         self._controller_status_label.setWordWrap(True)
         self._controller_status_label.setToolTip("显示当前运行状态；修改设置后请点击保存。")
         parent.addWidget(self._controller_status_label)
-        self._refresh_controller_status()
+        self._controller_enabled_check.toggled.connect(self._controller_enabled_changed)
+        self._controller_device_combo.currentIndexChanged.connect(self._update_controller_controls)
+        if self._controller_service is not None:
+            self._controller_service.binding_learned.connect(self._controller_binding_learned)
+            self._controller_signal_connected = True
+        self._refresh_controller_devices()
         self._controller_status_timer = QTimer(self)
         self._controller_status_timer.setInterval(1000)
         self._controller_status_timer.timeout.connect(self._refresh_controller_status)
-        self.finished.connect(self._controller_status_timer.stop)
+        self.finished.connect(self._finish_controller_edit)
+        self._refresh_controller_status()
         self._controller_status_timer.start()
 
+    def _refresh_controller_devices(self) -> None:
+        combo = self._controller_device_combo
+        selected = combo.currentData() or self._controller_binding_draft.get("device")
+        old_name = combo.currentText()
+        devices = []
+        try:
+            if self._controller_service is not None:
+                devices = self._controller_service.devices()
+        except Exception:
+            self._controller_learning_label.setText("暂时无法读取设备列表，请稍后刷新。")
+        with QSignalBlocker(combo):
+            combo.clear()
+            for device in devices:
+                if isinstance(device, dict) and isinstance(device.get("id"), str):
+                    combo.addItem(str(device.get("name") or "手柄"), device["id"])
+            if selected and combo.findData(selected) < 0:
+                name = (self._controller_binding_draft.get("name")
+                        if selected == self._controller_binding_draft.get("device") else old_name)
+                suffix = "原有 USB 背键配置" if selected == "switch2:auto" else "待连接"
+                combo.addItem(f"{name or '已选手柄'}（{suffix}）", selected)
+            if combo.count() == 0:
+                combo.addItem("连接手柄后点击刷新", None)
+            if selected and combo.findData(selected) >= 0:
+                combo.setCurrentIndex(combo.findData(selected))
+        self._update_controller_controls()
+
+    def _update_controller_controls(self) -> None:
+        enabled = self._controller_enabled_check.isChecked()
+        available = self._controller_service is not None and not self._controller_closed
+        idle = not self._controller_learning
+        selected = self._controller_device_combo.currentData()
+        self._controller_device_combo.setEnabled(enabled and available and idle)
+        self._controller_refresh_btn.setEnabled(available and idle)
+        self._controller_learn_btn.setEnabled(enabled and available and idle and bool(selected))
+        self._controller_cancel_learn_btn.setEnabled(available and not idle)
+        self._controller_clear_btn.setEnabled(idle and bool(self._controller_binding_draft))
+        self._controller_axes_check.setEnabled(enabled and available and idle
+                                               and bool(selected and selected.startswith("sdl:")))
+
+    def _controller_enabled_changed(self, enabled) -> None:
+        if not enabled:
+            self._cancel_controller_learning()
+        self._update_controller_controls()
+
+    def _start_controller_learning(self) -> None:
+        device = self._controller_device_combo.currentData()
+        if not self._controller_learn_btn.isEnabled() or not device:
+            return
+        self._controller_learning = True
+        self._controller_accept_result = True
+        self._controller_learning_label.setText("请先松开按键并保持摇杆静止，然后单独按下目标控件并松开。")
+        self._update_controller_controls()
+        try:
+            self._controller_service.start_learning(
+                device, include_axes=self._controller_axes_check.isChecked() and device.startswith("sdl:"))
+        except Exception:
+            self._controller_learning = False
+            self._controller_accept_result = False
+            self._controller_learning_label.setText("按键录入暂不可用，请刷新设备后重试。")
+            self._update_controller_controls()
+
+    def _cancel_controller_learning(self) -> None:
+        was_learning = self._controller_learning
+        self._controller_learning = False
+        self._controller_accept_result = False
+        if self._controller_service is not None:
+            self._controller_service.cancel_learning()
+        if was_learning:
+            self._controller_learning_label.setText("录入已取消，当前绑定保留。")
+        self._update_controller_controls()
+
+    def _controller_binding_learned(self, value) -> None:
+        binding = normalize_binding(value)
+        if self._controller_closed or not self._controller_accept_result or not binding:
+            return
+        selected = self._controller_device_combo.currentData()
+        if binding["device"] != selected and selected != "switch2:auto":
+            return
+        self._controller_learning = False
+        self._controller_accept_result = False
+        self._controller_service.cancel_learning()
+        self._controller_binding_draft = binding
+        self._controller_binding_label.setText(binding_label(binding))
+        self._controller_learning_label.setText("按键已录入，点击“保存”应用。")
+        self._refresh_controller_devices()
+        self._update_controller_controls()
+
+    def _clear_controller_binding(self) -> None:
+        self._controller_binding_draft = {}
+        self._controller_binding_label.setText(binding_label({}))
+        self._controller_learning_label.setText("绑定已清除，点击“保存”应用。")
+        self._update_controller_controls()
+
+    def _finish_controller_edit(self, *_args) -> None:
+        if self._controller_closed:
+            return
+        self._controller_closed = True
+        self._controller_learning = False
+        self._controller_accept_result = False
+        self._controller_status_timer.stop()
+        if self._controller_service is not None:
+            self._controller_service.cancel_learning()
+            if self._controller_signal_connected:
+                self._controller_service.binding_learned.disconnect(self._controller_binding_learned)
+                self._controller_signal_connected = False
+
     def _refresh_controller_status(self) -> None:
+        if self._controller_closed:
+            return
         status_fn = getattr(self._overlay, "controller_status_fn", None)
         try:
-            status = status_fn() if callable(status_fn) else "手柄状态暂不可用。"
+            status = (status_fn() if callable(status_fn) else
+                      self._controller_service.status if self._controller_service is not None else
+                      "手柄监听服务暂不可用。")
         except Exception:
             status = "暂时无法读取手柄状态，请稍后重试。"
         self._controller_status_label.setText(str(status or "手柄状态暂不可用。"))
+        if self._controller_learning and self._controller_service is not None:
+            message = getattr(self._controller_service, "learning_message", "")
+            if message:
+                self._controller_learning_label.setText(str(message))
+            if getattr(self._controller_service, "learning", True) is False:
+                self._controller_learning = False
+                self._update_controller_controls()
 
     def _fix_combo_popups(self) -> None:
         """Force every QComboBox popup in the dialog to be opaque dark."""
@@ -1172,6 +1324,7 @@ class SettingsDialog(QDialog):
         self._overlay.apply_appearance(self._cfg.overlay)
 
     def _on_save(self) -> None:
+        self._finish_controller_edit()
         self._cfg.game_title = normalize_game_text(self._game_title_edit.text(), GAME_TITLE_MAX_LENGTH)
         self._cfg.game_notes = normalize_game_text(self._game_notes_edit.toPlainText(), GAME_NOTES_MAX_LENGTH)
 
@@ -1187,8 +1340,9 @@ class SettingsDialog(QDialog):
 
         # Controller edits stay local to the dialog until Save is clicked.
         self._cfg.controller_enabled = self._controller_enabled_check.isChecked()
-        selected_button = self._controller_button_combo.currentData()
-        self._cfg.controller_button = selected_button if selected_button in ("GR", "GL") else "GR"
+        self._cfg.controller_binding = normalize_binding(self._controller_binding_draft)
+        if self._cfg.controller_binding.get("backend") == "switch2":
+            self._cfg.controller_button = "GL" if self._cfg.controller_binding["index"] else "GR"
 
         # API keys
         self._cfg.deepseek_api_key  = self._deepseek_key_edit.text().strip()
@@ -1261,8 +1415,13 @@ class SettingsDialog(QDialog):
     def _on_cancel(self) -> None:
         self.reject()
 
+    def closeEvent(self, event) -> None:
+        self._finish_controller_edit()
+        super().closeEvent(event)
+
     def reject(self) -> None:
         # Cancel, Escape and the window close button all discard live previews.
+        self._finish_controller_edit()
         self._cfg.overlay = copy.deepcopy(self._orig_overlay)
         self._overlay.apply_appearance(self._cfg.overlay)
         super().reject()

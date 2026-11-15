@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_all, copy_metadata
+from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, copy_metadata
 from pathlib import Path
 import os
 from runtime_bootstrap import system_msvc_path
@@ -13,7 +13,10 @@ binaries = []
 hiddenimports = [
     'qasync',
     'mss.windows',
+    'sdl2dll',
+    'sdl2',
 ]
+binaries += collect_dynamic_libs('sdl2dll')
 
 for package in ('sudachipy', 'sudachidict_core', 'meikiocr'):
     _d, _b, _h = collect_all(package)

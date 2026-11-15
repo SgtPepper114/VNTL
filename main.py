@@ -23,6 +23,7 @@ from overlay import OverlayWindow
 from hooker import HookerService
 from hotkeys import GlobalHotkeys
 from controller import ControllerService
+from controller_binding import binding_label
 from fonts import initialize_fonts
 from screenshot_service import ScreenshotService
 from summary_worker import BackgroundSummarizer
@@ -275,7 +276,7 @@ async def main() -> None:
 
     def request_controller_screen():
         if cfg.controller_enabled and app.activeModalWidget() is None:
-            logger.info("Controller translation requested: %s", cfg.controller_button)
+            logger.info("Controller translation requested: %s", binding_label(cfg.controller_binding))
             request_screen()
 
     def on_save(updated):
@@ -286,7 +287,7 @@ async def main() -> None:
         overlay.update_game_title()
         overlay.set_screenshot_enabled(updated.screenshot_enabled)
         overlay.update_observation_controls()
-        controller.configure(updated.controller_enabled, updated.controller_button)
+        controller.configure(updated.controller_enabled, binding=updated.controller_binding)
         observer.configure()
         summaries.request()
 
@@ -344,8 +345,9 @@ async def main() -> None:
     overlay.show()
     hotkeys = GlobalHotkeys(app, request_screen, overlay.toggle_visible)
     controller = ControllerService(app, request_controller_screen,
-                                   enabled=cfg.controller_enabled, button=cfg.controller_button)
+                                   enabled=cfg.controller_enabled, binding=cfg.controller_binding)
     overlay.controller_status_fn = lambda: controller.status
+    overlay.controller_service = controller
     if hotkeys.failed:
         overlay.show_error_text("", "快捷键被占用：" + "、".join(hotkeys.failed) + "。可使用浮窗按钮。")
 
@@ -371,6 +373,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--check-controller"]:
+        from diagnostics import check_controller
+        raise SystemExit(check_controller(sys.argv[2:]))
     if sys.argv[1:2] == ["--check-ocr"]:
         from diagnostics import check_ocr
         raise SystemExit(check_ocr(sys.argv[2:]))

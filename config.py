@@ -133,7 +133,8 @@ class Config:
     game_title: str = ""
     game_notes: str = ""
     controller_enabled: bool = True
-    controller_button: str = "GR"
+    controller_button: str = "GR"  # Legacy setting, migrated to controller_binding.
+    controller_binding: dict = field(default_factory=dict)
     context_summarize_tokens: int = 10_000
     context_min_recent_lines: int = 30
     summary_max_tokens:       int = 5_000
@@ -228,6 +229,11 @@ def load_config() -> Config:
         cfg.controller_enabled = controller_enabled if isinstance(controller_enabled, bool) else True
         controller_button = data.get("controller_button", "GR")
         cfg.controller_button = controller_button if controller_button in ("GR", "GL") else "GR"
+        from controller_binding import legacy_binding, normalize_binding
+        if "controller_binding" in data:
+            cfg.controller_binding = normalize_binding(data["controller_binding"])
+        elif "controller_button" in data:
+            cfg.controller_binding = legacy_binding(cfg.controller_button)
         cfg.context_summarize_tokens  = data.get("context_summarize_tokens", cfg.context_summarize_tokens)
         cfg.context_min_recent_lines  = data.get("context_min_recent_lines", 30)
         cfg.summary_max_tokens        = data.get("summary_max_tokens", 5_000)

@@ -1,7 +1,9 @@
 import unittest
 from collections import deque
 
-from controller import PressEdge, Switch2Reader, rear_buttons
+from controller import PressEdge, Switch2Reader, rear_buttons, switch2_devices
+from controller_binding import legacy_binding
+from controller_input import BindingTrigger
 
 
 def report(button_byte=0, other_byte=0):
@@ -103,6 +105,23 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.poll(2, report(1), report(1), report()))
         self.assertFalse(self.poll(3))
         self.assertTrue(self.poll(4, report(1)))
+
+    def test_batched_press_and_release_are_available_to_generic_trigger(self):
+        trigger = BindingTrigger()
+        self.poll(0, report())
+        trigger.update(legacy_binding(), self.reader.state, 0)
+        self.poll(1, report(1), report())
+        self.assertEqual([s["buttons"] for s in self.reader.states], [(True, False), (False, False)])
+        results = [trigger.update(legacy_binding(), state, 1) for state in self.reader.states]
+        self.assertEqual(results, [True, False])
+
+    def test_explicit_hid_device_selection_handles_multiple_identical_pads(self):
+        self.backend.devices.append(dict(path=b"second", usage_page=1, usage=5, interface_number=0))
+        devices = switch2_devices(self.backend)
+        self.assertEqual(len({d["id"] for d in devices}), 2)
+        self.backend.pad.reports.append(report())
+        self.assertFalse(self.reader.poll(True, "GR", 0, devices[1]["id"]))
+        self.assertIsNotNone(self.reader.state)
 
     def test_mapping_change_requires_release_before_trigger(self):
         self.poll(0, report())
