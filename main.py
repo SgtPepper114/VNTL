@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import os
 import sys
 from logging.handlers import RotatingFileHandler
@@ -14,7 +15,7 @@ preload_windows_runtime()
 
 from PyQt6.QtCore import QLockFile
 from PyQt6.QtWidgets import QApplication, QMessageBox
-import qasync
+from async_scheduler import create_event_loop
 
 from config import load_config, save_config
 from context_manager import ContextManager
@@ -149,8 +150,12 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
                     command, text = "text", current
                 last_clipboard = current
         if not command:
-            await asyncio.sleep(0.1)
-            continue
+            try:
+                # A newly queued key press wakes us directly. The timeout only
+                # polls legacy hook/clipboard sources; it never gates a press.
+                command, text = await asyncio.wait_for(requests.get(), timeout=0.1)
+            except TimeoutError:
+                continue
 
         if command == "compact":
             summaries.request(force=True)
@@ -161,6 +166,8 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             continue
 
         overlay.set_busy(True)
+        operation_started = time.monotonic()
+        logger.info("Translation operation started: command=%s", command)
         operation_epoch = context.epoch
         operation_target = getattr(screenshots, "generation", None)
 
@@ -172,11 +179,13 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             check_provider_key(cfg, "translator")
             if command == "screen":
                 check_provider_key(cfg, "descriptor")
+                logger.info("Translation stage: capture")
                 image = await capture_game(screenshots)
                 if not operation_current():
                     continue
                 overlay.show()
                 overlay.show_loading("正在识别日文与画面…")
+                logger.info("Translation stage: read_screen")
                 text, scene = await translator.read_screen(image)
                 if not operation_current():
                     continue
@@ -186,10 +195,12 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
                 context.current_scene_description = scene or None
             elif cfg.screenshot_enabled and screenshots.is_attached and command != "retry":
                 check_provider_key(cfg, "descriptor")
+                logger.info("Translation stage: capture_context")
                 image = await capture_game(screenshots)
                 if not operation_current():
                     continue
                 overlay.show_loading("正在读取场景…")
+                logger.info("Translation stage: describe_scene")
                 scene = await translator.describe_scene(image, text)
                 if not operation_current():
                     continue
@@ -202,6 +213,7 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
             old_line = context.history[-1] if context.history and context.history[-1].jp == text else None
             replaced = old_line is not None
             overlay.show_loading()
+            logger.info("Translation stage: translate")
             translated = await translator.translate(text, replace_last=replaced)
             if not operation_current():
                 continue
@@ -225,12 +237,15 @@ async def _process_inputs(translator, overlay, hooker, screenshots, cfg, context
                 overlay.show_retry_button(lambda t=text: enqueue(requests, "retry", t), is_error=True)
         finally:
             overlay.set_busy(False)
+            logger.info("Translation operation finished: command=%s elapsed=%.3fs",
+                        command, time.monotonic() - operation_started)
 
 
 def enqueue(requests, command: str, text: str = "") -> None:
     # One pending command is enough; key repeat must not create a paid backlog.
     if requests.empty():
         requests.put_nowait((command, text))
+        logger.info("Input queued: command=%s", command)
 
 
 def clear_requests(requests):
@@ -271,7 +286,11 @@ async def main() -> None:
     screenshots.threshold = cfg.scene_change_threshold
     screenshots.cooldown = cfg.scene_change_cooldown
     def request_screen():
-        if app.activeModalWidget() is None and (cfg.observation_enabled or not overlay.is_busy):
+        if app.activeModalWidget() is not None:
+            logger.info("Screen request deferred: modal dialog open")
+        elif not cfg.observation_enabled and overlay.is_busy:
+            logger.info("Screen request deferred: translation operation in progress")
+        else:
             enqueue(requests, "screen")
 
     def request_controller_screen():
@@ -373,6 +392,9 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--check-scheduler"]:
+        from diagnostics import check_scheduler
+        raise SystemExit(check_scheduler(sys.argv[2:]))
     if sys.argv[1:2] == ["--check-controller"]:
         from diagnostics import check_controller
         raise SystemExit(check_controller(sys.argv[2:]))
@@ -381,7 +403,7 @@ if __name__ == "__main__":
         raise SystemExit(check_ocr(sys.argv[2:]))
     _setup_logging()
     app = QApplication(sys.argv)
-    loop = qasync.QEventLoop(app)
+    loop = create_event_loop(app)
     asyncio.set_event_loop(loop)
     with loop:
         try:

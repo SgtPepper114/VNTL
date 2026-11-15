@@ -7,7 +7,7 @@ dependencies = [
     "openai",
     "truststore>=0.10.5; sys_platform == 'win32'",
     "pyqt6>=6.6.0,<6.11.0",
-    "qasync",
+    "qasync==0.28.0",
     "mss",
     "pillow",
     "hidapi>=0.14,<0.16",

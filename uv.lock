@@ -1253,7 +1253,7 @@ requires-dist = [
     { name = "pyqt6", specifier = ">=6.6.0,<6.11.0" },
     { name = "pysdl2", specifier = "==0.9.17" },
     { name = "pysdl2-dll", specifier = "==2.32.10" },
-    { name = "qasync" },
+    { name = "qasync", specifier = "==0.28.0" },
     { name = "sudachidict-core", specifier = "==20260428" },
     { name = "sudachipy", specifier = "==0.6.11" },
     { name = "truststore", marker = "sys_platform == 'win32'", specifier = ">=0.10.5" },

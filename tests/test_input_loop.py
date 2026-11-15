@@ -83,6 +83,48 @@ class InputLoopTests(unittest.IsolatedAsyncioTestCase):
             main.enqueue(requests, "screen")
         self.assertEqual(requests.qsize(), 1)
 
+    async def test_queued_key_wakes_idle_loop_without_waiting_for_a_polling_sleep(self):
+        context = ContextManager()
+        cfg = Config(deepseek_api_key="test-placeholder")
+        requests = asyncio.Queue(maxsize=1)
+        finished = asyncio.Event()
+        overlay = Mock()
+        overlay.set_busy.side_effect = lambda busy: finished.set() if not busy else None
+        translator = Mock()
+
+        async def translate(text, *, replace_last=False):
+            context.add_line(text, "译文")
+            return "译文"
+
+        translator.translate = AsyncMock(side_effect=translate)
+        # Reproduce the observed lost sleep wakeup. Queued user input must still
+        # reach the consumer, independently of this never-completing sleep.
+        async def lost_sleep(*args):
+            await asyncio.Future()
+
+        broken_asyncio = SimpleNamespace(**vars(asyncio))
+        broken_asyncio.sleep = AsyncMock(side_effect=lost_sleep)
+        fake_app = SimpleNamespace(clipboard=lambda: SimpleNamespace(text=lambda: ""))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(main, "QApplication", fake_app), \
+                patch.object(main, "asyncio", broken_asyncio), \
+                patch.object(main, "AUTOSAVE_PATH", Path(directory) / "memory.json"):
+            task = asyncio.create_task(main.input_loop(
+                translator, overlay, SimpleNamespace(is_attached=False), Mock(),
+                cfg, context, requests, Mock()))
+            try:
+                for index in range(3):
+                    await asyncio.sleep(0.02)  # Let the consumer become idle.
+                    finished.clear()
+                    main.enqueue(requests, "text", f"台詞{index}")
+                    await asyncio.wait_for(finished.wait(), 1)
+                self.assertEqual(translator.translate.await_count, 3)
+                broken_asyncio.sleep.assert_not_awaited()
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
     async def test_capture_does_not_hide_an_active_modal_dialog(self):
         fake_app = Mock()
         fake_app.activeModalWidget.return_value = object()

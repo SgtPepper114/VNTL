@@ -158,3 +158,75 @@ def check_controller(arguments: list[str]) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return 0 if result["ok"] else 1
+
+
+def check_scheduler(arguments: list[str]) -> int:
+    """Check the production Qt event loop without a VNTL instance or API calls."""
+    if len(arguments) != 1:
+        return 2
+    import asyncio
+    import threading
+    from PyQt6.QtWidgets import QApplication
+    from async_scheduler import create_event_loop
+
+    output_path = Path(arguments[0])
+    result = {"ok": False}
+    app = QApplication.instance() or QApplication([])
+    app.setQuitOnLastWindowClosed(False)
+    loop = create_event_loop(app)
+    gui_thread = threading.get_ident()
+
+    async def exercise():
+        checks = {}
+        callbacks = []
+        for index in range(2000):
+            loop.call_soon(callbacks.append, index)
+        await asyncio.sleep(0.02)
+        while len(callbacks) < 2000:
+            await asyncio.sleep(0.002)
+        checks["queued_callbacks_in_order"] = callbacks == list(range(2000))
+
+        elapsed = []
+        for _ in range(160):
+            started = loop.time()
+            await asyncio.sleep(0.002)
+            elapsed.append(loop.time() - started)
+        checks["all_sleeps_resumed"] = len(elapsed) == 160
+        checks["deadlines_never_early"] = min(elapsed) >= 0.002
+
+        queue = asyncio.Queue()
+        def signal_from_worker():
+            loop.call_soon_threadsafe(queue.put_nowait, "translation-request")
+        await asyncio.to_thread(signal_from_worker)
+        checks["thread_queued_input"] = await asyncio.wait_for(queue.get(), 1) == "translation-request"
+        checks["callback_thread_is_gui"] = threading.get_ident() == gui_thread
+        try:
+            await asyncio.wait_for(asyncio.Event().wait(), 0.02)
+        except TimeoutError:
+            checks["timeout_resumed"] = True
+        task = asyncio.create_task(asyncio.sleep(10))
+        await asyncio.sleep(0.002)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            checks["cancellation_resumed"] = True
+        return checks
+
+    started = time.perf_counter()
+    try:
+        asyncio.set_event_loop(loop)
+        with loop:
+            checks = loop.run_until_complete(asyncio.wait_for(exercise(), 15))
+        result.update(ok=all(checks.values()), checks=checks,
+                      scheduler=type(loop._timer).__name__,
+                      elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
+    except Exception as exc:
+        result["error_type"] = type(exc).__name__
+    finally:
+        if not loop.is_closed():
+            loop.close()
+        asyncio.set_event_loop(None)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return 0 if result["ok"] else 1

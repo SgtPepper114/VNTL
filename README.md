@@ -178,6 +178,8 @@ git diff --check
 
 保留运行中实例时，可用 `uv run python tools/build.py --distpath dist/updated` 将新版输出到独立目录。手柄组件的离线运行检查可使用 `vntl.exe --check-controller controller-check.json`，它在独立进程中创建 SDL 虚拟手柄，验证输入采集、绑定与触发流程，并将结果写入指定 JSON。
 
+异步调度检查使用 `vntl.exe --check-scheduler scheduler-check.json`，验证连续回调、延时唤醒、后台线程投递、超时与取消。两项诊断均使用独立测试数据。运行日志记录翻译请求入队、截图、识屏、翻译及完成耗时，便于定位等待阶段。
+
 本仓库的 `main` 分支与上游版本保持对应，持续观察功能在 `codex/continuous-observation` 分支开发。`origin` 对应个人 fork，`upstream` 对应 `itsNokts/VNTL`；提交使用 `feat:`、`fix:`、`docs:` 等 Conventional Commits 类型。
 
 感谢 [itsNokts/VNTL](https://github.com/itsNokts/VNTL) 提供文字钩子、翻译流程与浮窗基础，以及 [MeikiOCR](https://github.com/rtr46/meikiocr)、[SudachiPy](https://github.com/WorksApplications/SudachiPy)、[SudachiDict](https://github.com/WorksApplications/SudachiDict) 和 [SDL](https://github.com/libsdl-org/SDL) 提供的识字、词典工具与手柄协议参考。

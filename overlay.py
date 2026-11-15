@@ -415,6 +415,7 @@ class OverlayWindow(QWidget):
         self.is_busy = False
         self._observation_status_text = "等待选择游戏窗口"
         self.controller_status_fn = lambda: "手柄监听尚未启动"
+        self._settings_dialog = None
         self._background_layer = None
 
         self._setup_window()
@@ -1001,7 +1002,26 @@ class OverlayWindow(QWidget):
 
     def _open_settings(self) -> None:
         from settings import SettingsDialog  # lazy import avoids circular
-        SettingsDialog(self._cfg, self, self._save_fn, self._screenshot_service, self._hooker).exec()
+        if self._settings_dialog is not None:
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            return
+
+        dialog = SettingsDialog(self._cfg, self, self._save_fn,
+                                self._screenshot_service, self._hooker)
+        self._settings_dialog = dialog
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        # Keep the previous application-modal behavior without exec()'s nested
+        # event loop. Qt's open() is asynchronous too, but changes to WindowModal.
+        dialog.setModal(True)
+        dialog.finished.connect(lambda _result, current=dialog: self._release_settings_dialog(current))
+        dialog.destroyed.connect(lambda _object=None, current=dialog: self._release_settings_dialog(current))
+        dialog.show()
+
+    def _release_settings_dialog(self, dialog) -> None:
+        # Deferred deletion of a previous dialog may follow opening its successor.
+        if self._settings_dialog is dialog:
+            self._settings_dialog = None
 
     # ------------------------------------------------------------------
     # Painting — dark rounded background
